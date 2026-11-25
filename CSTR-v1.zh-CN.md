@@ -5,9 +5,9 @@
 CSTR 把索引放在文件开头。阅读器可以按字节范围定位指定页、图像块或缩略图。
 
 ```text
-[文件头][页表][块表][缩略图表*][JSON 元数据*][正文图像块][缩略图数据*]
+[文件头][封面描述*][页表][块表][缩略图表*][JSON 元数据*][封面 WebP*][正文图像块][缩略图数据*]
 
-* 可选。文件头标志位 bit 0 同时启用缩略图表和缩略图数据。
+* 可选。文件头标志位 bit 0 启用缩略图；bit 1 启用独立封面。
 ```
 
 ## 1. 二进制规范
@@ -20,10 +20,10 @@ CSTR 把索引放在文件开头。阅读器可以按字节范围定位指定页
 | ---: | --- | --- | --- |
 | 0 | `u8[4]` | `magic` | ASCII `CSTR`，即 `43 53 54 52` |
 | 4 | `u16` | `version` | `1` |
-| 6 | `u16` | `flags` | bit 0 表示包含缩略图，其余位必须为 `0` |
+| 6 | `u16` | `flags` | bit 0 表示缩略图，bit 1 表示封面，更高位为零 |
 | 8 | `u32` | `page_count` | 至少 `1` |
 | 12 | `u32` | `chunk_count` | 至少等于 `page_count` |
-| 16 | `u64` | `index_offset` | `32` |
+| 16 | `u64` | `index_offset` | 无封面为 32，有封面为 48 |
 | 24 | `u32` | `index_size` | 页表、块表和可选缩略图表的字节数之和 |
 | 28 | `u32` | `meta_size` | `0` 表示无元数据，其余为 UTF-8 字节数 |
 
@@ -31,7 +31,7 @@ CSTR 把索引放在文件开头。阅读器可以按字节范围定位指定页
 index_size = 16 × page_count + 20 × chunk_count
            + (flags & 1 时为 16 × page_count，否则为 0)
 meta_start = index_offset + index_size
-body_start = meta_start + meta_size
+body_start = meta_start + meta_size + cover_size  # cover_size = 0 without a cover
 ```
 
 ### 页表，单条 16 字节
@@ -87,10 +87,14 @@ thumbnail_table = index_offset + 16 × page_count + 20 × chunk_count
 thumbnail_start = body_end
 image_start     = thumbnail_start + thumbnail.offset
 image_end       = image_start + thumbnail.size
-file_size       = thumbnail_start + last_thumbnail.offset + last_thumbnail.size
+thumbnail_end   = thumbnail_start + last_thumbnail.offset + last_thumbnail.size
 ```
 
 每张缩略图都是完整的单帧 WebP，图像尺寸必须与记录相符。首张的偏移为零，后续每张紧接前一张。最后一张结束于文件末尾。图像之间的填充和文件尾随内容均视为格式错误。
+
+### 可选封面（bit 1）
+
+基础文件头之后是 16 字节的小端描述。文件偏移 32 为 `cover_offset: u64`（绝对字节位置），40 为 `cover_size: u32`，44 和 46 分别为 `width: u16` 和 `height: u16`。页表从文件偏移 48 开始。单帧 WebP 从 `index_offset + index_size + meta_size` 开始，正文紧接封面。尺寸须与图像匹配，各为 1–2560；长度为 1–2097152 字节。bit 1 为零时省略描述和封面，索引从 32 开始。旧版严格阅读器会拒绝 bit 1。封面损坏时，可单独报告错误并继续读取校验通过的正文。
 
 ### JSON 元数据
 

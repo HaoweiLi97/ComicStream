@@ -9,9 +9,9 @@ CSTR (`.cstr`) is a comic file format optimized for streaming. Its binary index 
 ![CSTR v1 file layout and byte offsets for header, page, chunk, and thumbnail records (Chinese labels)](docs/images/cstr-v1-layout.zh-CN.png)
 
 ```text
-[Header][Page table][Chunk table][Thumbnail table*][JSON metadata*][Image chunks][Thumbnail data*]
+[Header][Cover descriptor*][Page table][Chunk table][Thumbnail table*][JSON metadata*][Cover WebP*][Image chunks][Thumbnail data*]
 
-* Optional. Header flag bit 0 enables both thumbnail sections.
+* Optional. Header flag bit 0 enables thumbnails. Bit 1 enables the independent cover.
 ```
 
 | Section | Contents | How readers use it |
@@ -24,11 +24,11 @@ CSTR (`.cstr`) is a comic file format optimized for streaming. Its binary index 
 | Image chunks | Contiguous single-frame images in reading order | Read one chunk for a typical page or several for a long page |
 | Thumbnail data (optional) | Contiguous single-frame WebP images in page order | Load small images for page previews |
 
-The current format is **CSTR v1**. Multi-byte integers are unsigned and little-endian. Page and chunk indices are zero-based. Files with thumbnails use `version = 1` and `flags = 0x0001`. Files with `flags = 0` have no thumbnail sections. [Binary specification and byte sample](CSTR-v1.md)
+The current format is **CSTR v1**. Multi-byte integers are unsigned and little-endian. Page and chunk indices are zero-based. Flag bits 0 and 1 independently enable page thumbnails and a book cover. [Binary specification and byte sample](CSTR-v1.md)
 
 ## Locate an image by byte range
 
-1. Read the header and index. The first body chunk begins at `index_offset + index_size + meta_size`.
+1. Read the header and index. The first body chunk begins at `index_offset + index_size + meta_size + cover_size` (zero cover size when absent).
 2. Look up the page's first chunk and count. A chunk's vertical position is the sum of the heights of the earlier chunks on that page. Its byte range starts at `body_start + chunk.offset`.
 3. If present, thumbnail data begins immediately after the final body chunk. The target image begins at `thumbnail_start + thumbnail.offset`. Read `thumbnail.size` bytes to get one complete WebP.
 
@@ -59,6 +59,17 @@ The reader allows up to 128 MiB of decoded RGBA and 32 MiB of encoded data per c
 `--thumbnails` embeds one thumbnail per page. Thumbnails retain their aspect ratio and target a minimum width of 160 px and height of 224 px without upscaling. The packer uses the top of a very tall page or the center of a very wide page. `--metadata` accepts a UTF-8 JSON object, and `--reading-direction` takes precedence over its `readingDirection` field.
 
 ComicStream's packer and reader both limit the index to 8 MiB and JSON metadata to 256 KiB.
+
+## Independent book cover
+
+Use `--cover` for the first page, `--cover-page 3` for the third page in natural order, or `--cover-file` for external artwork. Any cover option enables the independent cover, even with page thumbnails disabled.
+
+~~~sh
+python pack.py --cbz book.cbz --cover -o book.cstr
+python pack.py --cbz book.cbz --cover-file art.jpg --cover-width 1200 --cover-height 1800 --cover-kib 1024 --cover-quality 85 -o book.cstr
+~~~
+
+Defaults are a 640 × 909 bounding box, quality 85, and a 128 KiB budget. Choose each dimension from 1–2560, a budget of 1–2048 KiB, and quality 0–100. Images retain their aspect ratio and shrink further to fit the budget. External artwork is limited to 32 MiB and 32 million pixels. The cover follows the index and optional metadata. Shelves can call `readCover(source)` for the dimensions and WebP bytes. Omitting cover options preserves the original layout. Older readers must be updated to open cover-enabled files.
 
 ## Open a comic in the browser
 

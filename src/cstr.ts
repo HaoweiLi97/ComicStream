@@ -1,8 +1,12 @@
+import { validateWebP } from "./webp.js";
+
 const HEADER = 32;
 const PAGE = 16;
 const CHUNK = 20;
 const THUMBNAIL = 16;
 const FLAG_THUMBNAILS = 1;
+const FLAG_COVER = 2;
+const COVER = 16;
 export const CODEC = { webp: 1, avif: 2, png: 3, jpeg: 4 } as const;
 const U64_MAX = (1n << 64n) - 1n;
 export const LIMITS = {
@@ -203,7 +207,7 @@ export function readingDirection(value: unknown): ReadingDirection | undefined {
 
 const viewOf = (bytes: Uint8Array) => new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
 
-function readThumbnailIndex(index: DataView, table: number, count: number, start: bigint, fileSize: bigint) {
+function readThumbnailIndex(index: DataView, table: number, count: number, start: bigint, fileSize: bigint, hasCover: boolean) {
   const thumbnails: Thumbnail[] = [];
   let position = start;
   for (let page = 0; page < count; page++) {
@@ -219,37 +223,89 @@ function readThumbnailIndex(index: DataView, table: number, count: number, start
     position += BigInt(size);
     if (position > fileSize || position > U64_MAX) throw new FormatError("缩略图超出文件范围");
   }
-  if (position !== fileSize) throw new FormatError("缩略图区长度与文件总长不匹配");
+  if (!hasCover && position !== fileSize) throw new FormatError("缩略图区长度与文件总长不匹配");
   return thumbnails;
 }
 
-export async function readComic(
-  source: ByteSource, signal?: AbortSignal, { tolerateInvalidThumbnails = false } = {},
-) {
+async function readHeader(source: ByteSource, signal?: AbortSignal) {
   if (source.size < BigInt(HEADER)) throw new FormatError("漫画包文件头不完整");
   const bytes = await source.read(0n, BigInt(HEADER), signal);
   const header = viewOf(bytes);
   if (header.getUint32(0) !== 0x43535452) throw new FormatError("文件不是 CSTR 漫画包");
   const version = header.getUint16(4, true);
   const flags = header.getUint16(6, true);
-  if (version !== 1 || (flags & ~FLAG_THUMBNAILS) !== 0) {
+  if (version !== 1 || (flags & ~(FLAG_THUMBNAILS | FLAG_COVER)) !== 0) {
     throw new FormatError("不支持此 CSTR 版本或标志位");
   }
+  const indexOffset = header.getBigUint64(16, true);
+  const coverStart = BigInt(HEADER + COVER);
+  // Older experimental packs can have their cover before the index.
+  const validOffset = flags & FLAG_COVER
+    ? indexOffset >= coverStart && indexOffset <= coverStart + 2097152n
+    : indexOffset === BigInt(HEADER);
+  if (!validOffset || indexOffset > source.size) {
+    throw new FormatError("Invalid CSTR index offset");
+  }
+  return { header, flags, indexOffset };
+}
+
+async function coverRecord(source: ByteSource, signal?: AbortSignal) {
+  const record = viewOf(await source.read(32n, 48n, signal));
+  const start = record.getBigUint64(0, true);
+  const size = record.getUint32(8, true);
+  const width = record.getUint16(12, true), height = record.getUint16(14, true);
+  return { start, size, width, height };
+}
+
+/** Fetch only the fixed header and optional cover. Page tables and body are not needed. */
+export async function readCover(source: ByteSource, signal?: AbortSignal) {
+  const { flags, header, indexOffset } = await readHeader(source, signal);
+  if (!(flags & FLAG_COVER)) return undefined;
+  const metaEnd = indexOffset + BigInt(header.getUint32(24, true)) + BigInt(header.getUint32(28, true));
+  return readCoverData(source, indexOffset, metaEnd, undefined, signal);
+}
+
+async function readCoverData(source: ByteSource, indexOffset: bigint, metaEnd: bigint, expected: bigint | undefined, signal?: AbortSignal) {
+  const { start, size, width, height } = await coverRecord(source, signal);
+  const end = start + BigInt(size);
+  const validLocation = indexOffset > 48n
+    ? start === 48n && end === indexOffset
+    : (start === metaEnd && end < source.size)
+      || (start > metaEnd && end === source.size && (expected === undefined || start === expected));
+  if (!width || !height || width > 2560 || height > 2560 || !size || size > 2 * 1024 * 1024
+      || !validLocation) throw new FormatError("Invalid CSTR cover");
+  const bytes = await source.read(start, end, signal);
+  validateWebP(bytes, width, height);
+  return { width, height, bytes };
+}
+
+export async function readComic(
+  source: ByteSource, signal?: AbortSignal, { tolerateInvalidThumbnails = false } = {},
+) {
+  const { header, flags, indexOffset } = await readHeader(source, signal);
   const pageCount = header.getUint32(8, true);
   const chunkCount = header.getUint32(12, true);
   const indexLength = header.getUint32(24, true);
   const metaLength = header.getUint32(28, true);
   const thumbnailTable = pageCount * PAGE + chunkCount * CHUNK;
   const hasThumbnails = (flags & FLAG_THUMBNAILS) !== 0;
-  if (!pageCount || chunkCount < pageCount || header.getBigUint64(16, true) !== BigInt(HEADER)
+  if (!pageCount || chunkCount < pageCount
       || indexLength !== thumbnailTable + (hasThumbnails ? pageCount * THUMBNAIL : 0)) {
     throw new FormatError("索引长度或记录数量无效");
   }
   if (indexLength > LIMITS.index) throw new FormatError("索引超过阅读器的读取上限");
-  const metaStart = BigInt(HEADER + indexLength);
-  let position = metaStart + BigInt(metaLength);
+  const metaStart = indexOffset + BigInt(indexLength);
+  const metaEnd = metaStart + BigInt(metaLength);
+  const record = (flags & FLAG_COVER) && indexOffset === 48n ? await coverRecord(source, signal) : undefined;
+  const coverBeforeBody = record?.start === metaEnd;
+  if (coverBeforeBody && (!record.size || record.size > 2097152)) throw new FormatError("Invalid CSTR cover size");
+  const trailingCover = record !== undefined && !coverBeforeBody;
+  if (trailingCover && (record.start <= metaEnd || record.start > source.size)) {
+    throw new FormatError("Invalid CSTR cover offset");
+  }
+  let position = metaEnd + BigInt(coverBeforeBody ? record.size : 0);
   if (position > source.size) throw new FormatError("文件在 Payload 之前截断");
-  const index = viewOf(await source.read(BigInt(HEADER), metaStart, signal));
+  const index = viewOf(await source.read(indexOffset, metaStart, signal));
   const payloadStart = position;
   const pages: Page[] = [];
   const chunks: Chunk[] = [];
@@ -280,16 +336,17 @@ export async function readComic(
         throw new FormatError("块超出页高或文件范围");
       }
     }
+    if (trailingCover && position > record.start) throw new FormatError("Body overlaps CSTR cover");
     if (y !== height) throw new FormatError("块高之和与页高不符");
   }
-  if (chunks.length !== chunkCount || (!hasThumbnails && position !== source.size)) {
+  if (chunks.length !== chunkCount || (!hasThumbnails && !trailingCover && position !== source.size)) {
     throw new FormatError("索引未覆盖全部块，或文件长度不匹配");
   }
   let thumbnails: Thumbnail[] = [];
   let thumbnailError: FormatError | undefined;
   if (hasThumbnails) {
     try {
-      thumbnails = readThumbnailIndex(index, thumbnailTable, pageCount, position, source.size);
+      thumbnails = readThumbnailIndex(index, thumbnailTable, pageCount, position, source.size, trailingCover);
     } catch (error) {
       if (!tolerateInvalidThumbnails || !(error instanceof FormatError)) throw error;
       thumbnailError = error;
@@ -312,6 +369,12 @@ export async function readComic(
 
   return {
     pages, chunks, thumbnails, thumbnailError, source, readThumbnails,
+    async readCover(coverSignal?: AbortSignal) {
+      if (!(flags & FLAG_COVER)) return undefined;
+      const last = thumbnails.at(-1);
+      const expected = last ? last.start + BigInt(last.size) : position;
+      return readCoverData(source, indexOffset, metaEnd, thumbnailError ? undefined : expected, coverSignal);
+    },
     async readThumbnail(page: number, previewSignal?: AbortSignal) {
       const [image] = await readThumbnails(page, page + 1, previewSignal);
       return image;
@@ -319,7 +382,7 @@ export async function readComic(
     async metadata(metadataSignal?: AbortSignal): Promise<Record<string, unknown> | undefined> {
       if (metaLength === 0) return undefined;
       if (metaLength > LIMITS.metadata) throw new FormatError("元数据超过读取上限");
-      const data = await source.read(metaStart, payloadStart, metadataSignal);
+      const data = await source.read(metaStart, metaEnd, metadataSignal);
       try {
         if (data[0] === 0xef && data[1] === 0xbb && data[2] === 0xbf) throw new Error();
         const value: unknown = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(data));

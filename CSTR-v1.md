@@ -5,7 +5,7 @@ English · [简体中文](CSTR-v1.zh-CN.md)
 CSTR stores the index at the front of the file so a reader can locate individual pages, image chunks, and thumbnails by byte range.
 
 ```text
-[Header][Page table][Chunk table][Thumbnail table*][JSON metadata*][Image chunks][Thumbnail data*]
+[Header][Cover descriptor*][Page table][Chunk table][Thumbnail table*][JSON metadata*][Cover WebP*][Image chunks][Thumbnail data*]
 
 * Optional. Header flag bit 0 controls both thumbnail sections.
 ```
@@ -18,10 +18,10 @@ All multi-byte integers are unsigned and little-endian. Records are packed witho
 | ---: | --- | --- | --- |
 | 0 | `u8[4]` | `magic` | ASCII `CSTR` (`43 53 54 52`) |
 | 4 | `u16` | `version` | `1` |
-| 6 | `u16` | `flags` | Bit 0 indicates thumbnails. All other bits must be zero. |
+| 6 | `u16` | `flags` | Bit 0 enables thumbnails, bit 1 enables a cover. All higher bits must be zero. |
 | 8 | `u32` | `page_count` | At least 1 |
 | 12 | `u32` | `chunk_count` | At least `page_count` |
-| 16 | `u64` | `index_offset` | `32` |
+| 16 | `u64` | `index_offset` | 32 without cover, 48 with cover |
 | 24 | `u32` | `index_size` | Combined byte length of the tables |
 | 28 | `u32` | `meta_size` | UTF-8 byte length of metadata, or zero |
 
@@ -29,7 +29,7 @@ All multi-byte integers are unsigned and little-endian. Records are packed witho
 index_size = 16 × page_count + 20 × chunk_count
            + (16 × page_count if flags & 1, otherwise 0)
 meta_start = index_offset + index_size
-body_start = meta_start + meta_size
+body_start = meta_start + meta_size + cover_size  # cover_size = 0 without a cover
 ```
 
 ## Page table
@@ -85,10 +85,14 @@ thumbnail_table = index_offset + 16 × page_count + 20 × chunk_count
 thumbnail_start = body_end
 image_start     = thumbnail_start + thumbnail.offset
 image_end       = image_start + thumbnail.size
-file_size       = thumbnail_start + last_thumbnail.offset + last_thumbnail.size
+thumbnail_end   = thumbnail_start + last_thumbnail.offset + last_thumbnail.size
 ```
 
-Each thumbnail is a complete single-frame WebP. The dimensions in the record must match the image. The first thumbnail has offset zero. Each following thumbnail starts at the previous thumbnail's end. The final thumbnail ends at the end of the file. The format allows neither padding between images nor trailing bytes.
+Each thumbnail is a complete single-frame WebP. The dimensions in the record must match the image. The first thumbnail has offset zero. Each following thumbnail starts at the previous thumbnail's end. The final thumbnail ends at EOF. The format allows neither padding between images nor trailing bytes.
+
+## Optional cover (bit 1)
+
+A 16-byte little-endian descriptor follows the base header. At file offsets 32, 40, 44 and 46 it stores the absolute `cover_offset: u64`, `cover_size: u32`, `width: u16` and `height: u16`. The page index starts at byte 48. The single-frame cover WebP starts at `index_offset + index_size + meta_size`, followed immediately by the body. Dimensions must match the image and each be 1–2560. Size must be 1–2097152 bytes. With bit 1 clear, both descriptor and cover are omitted and the index starts at 32. Older strict readers reject bit 1. Cover errors can be reported separately from validated body pages.
 
 ## JSON metadata
 
