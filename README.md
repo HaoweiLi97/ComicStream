@@ -36,20 +36,23 @@ The optional `readingDirection` field accepts `ltr` (left to right), `rtl` (righ
 
 ## Pack a CBZ or image files
 
-Requires Python 3.10 or later. Run these commands from the project directory.
+Requires Python 3.10 or later. AVIF input also requires a Pillow build with AVIF support. Run these commands from the project directory.
 
 ~~~powershell
 py -m pip install -r requirements.txt
 py pack.py --cbz book.cbz --list-pages
 py pack.py --cbz book.cbz -o book.cstr
 py pack.py --cbz book.cbz --thumbnails --reading-direction rtl -o book.cstr
+py pack.py --cbz book.cbz --webp -o book-webp.cstr
 py pack.py --cbz webtoon.cbz --strip-height 1600 -o webtoon.cstr
 py pack.py -o book.cstr 10.png 2.png 1.png
 ~~~
 
 The packer sorts paths naturally, so images named `1.png`, `2.png`, and `10.png` appear in that order. To select images with `--manifest pages.json`, supply a JSON array of paths relative to the manifest. Use `--list-pages` with any input type to check the resulting order.
 
-The packer typically encodes a page as a single WebP. It splits large pages to fit the WebP dimension limit, the 128 MiB decoded RGBA budget per chunk, and the 32 MiB encoded chunk limit. Use `--strip-height` to set a maximum strip height, `--quality` to adjust WebP quality, or `--lossless` to enable lossless body encoding.
+The packer preserves the original bytes of whole-page JPEG, PNG, WebP, and AVIF images when they fit the reader's limits and need no orientation or layout normalization. It encodes pages that need normalization, strips, or a format conversion as WebP. Single-frame GIF, BMP, and TIFF can be imported through conversion. Animated and other multi-frame inputs are rejected.
+
+The reader allows up to 128 MiB of decoded RGBA and 32 MiB of encoded data per chunk. Use `--strip-height` to set a maximum strip height. Use `--webp` for readers that only support WebP, or use `--quality` or `--lossless` to force WebP at the selected quality or in lossless mode.
 
 `--thumbnails` embeds one thumbnail per page. Thumbnails retain their aspect ratio and target a minimum width of 160 px and height of 224 px without upscaling. The packer uses the top of a very tall page or the center of a very wide page. `--metadata` accepts a UTF-8 JSON object, and `--reading-direction` takes precedence over its `readingDirection` field.
 

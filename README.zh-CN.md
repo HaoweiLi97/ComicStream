@@ -36,22 +36,25 @@ CSTR（`.cstr`）是为流式阅读优化的漫画文件格式。文件开头的
 
 ## 转换 CBZ 和散图
 
-需要 Python 3.10+。以下命令在项目目录运行。
+需要 Python 3.10+。导入 AVIF 需要安装支持 AVIF 的 Pillow。以下命令在项目目录运行。
 
 ~~~powershell
 py -m pip install -r requirements.txt
 py pack.py --cbz book.cbz --list-pages
 py pack.py --cbz book.cbz -o book.cstr
 py pack.py --cbz book.cbz --thumbnails --reading-direction rtl -o book.cstr
+py pack.py --cbz book.cbz --webp -o book-webp.cstr
 py pack.py --cbz webtoon.cbz --strip-height 1600 -o webtoon.cstr
 py pack.py -o book.cstr 10.png 2.png 1.png
 ~~~
 
 所有输入都按路径逐级自然排序。`chapter 2/1.png` 在 `chapter 10/1.png` 之前，同目录下的 `1.png`、`2.png`、`10.png` 按数字顺序排列。也可以用 `--manifest pages.json` 指定参加打包的图片。清单是 JSON 字符串数组，路径相对于清单文件。`--list-pages` 可与以上任一种输入配合使用。
 
-普通页默认整页编码成 WebP。达到 WebP 尺寸、自带阅读器单块 128 MiB RGBA 预算或 32 MiB 压缩大小上限时，打包器会自动切段。长条漫可用 `--strip-height` 指定每段的最大高度。`--lossless` 启用无损编码，`--quality` 调整编码质量，`--metadata` 接受 UTF-8 JSON 对象，阅读器会显示其中的 `title`。
+整页 JPEG、PNG、WebP 和 AVIF 在符合读取上限且无需校正方向或布局时，保留原始字节。需要校正、切段或格式转换的页面会编码为 WebP。单帧 GIF、BMP 和 TIFF 可通过转换导入。打包器会拒绝动画等多帧输入。
 
-`--thumbnails` 为每页嵌入一张缩略图。小图保持比例，以宽至少 160 像素、高至少 224 像素为目标。极长页取顶部，极宽页取中央，原图太小时保留可用像素。用 `--reading-direction ltr|rtl|ttb` 设置方向，命令行值优先于元数据文件。
+阅读器每块最多允许 128 MiB 的 RGBA 解码预算和 32 MiB 的压缩数据。可用 `--strip-height` 指定每段最大高度。面向只支持 WebP 的阅读器时，可用 `--webp` 强制转换，也可以用 `--quality` 指定 WebP 质量或用 `--lossless` 写出无损 WebP。
+
+`--thumbnails` 为每页嵌入一张 WebP 缩略图。小图保持比例，以宽至少 160 像素、高至少 224 像素为目标。极长页取顶部，极宽页取中央，原图太小时保留可用像素。`--metadata` 接受 UTF-8 JSON 对象。用 `--reading-direction ltr|rtl|ttb` 设置方向，命令行值优先于元数据文件。
 
 ComicStream 打包器和阅读器采用相同的上限。索引区最多 8 MiB，JSON 元数据最多 256 KiB，均按写入文件的字节数计算。
 
@@ -69,7 +72,7 @@ npm start
 
 如果正文索引有效且正文块的字节范围完整，缩略图索引损坏或包尾的缩略图区截断时，阅读器会提示并关闭页面预览，正文仍可阅读。
 
-本地开发服务器为 `library` 目录中的 `.cstr` 提供 Range 读取。`library/book.cstr` 可通过同源链接 `/library/book.cstr` 打开。远程服务应支持单区间 Range 和原始字节传输。跨域时需允许页面来源并暴露 `Content-Range`、`ETag`。同一地址对应的内容会更新时，勾选“链接内容可能更新”，该服务需提供强 ETag 并允许 `If-Range`。当前阅读器解码 WebP。
+本地开发服务器为 `library` 目录中的 `.cstr` 提供 Range 读取。`library/book.cstr` 可通过同源链接 `/library/book.cstr` 打开。远程服务应支持单区间 Range 和原始字节传输。跨域时需允许页面来源并暴露 `Content-Range`、`ETag`。同一地址对应的内容会更新时，勾选“链接内容可能更新”，该服务需提供强 ETag 并允许 `If-Range`。
 
 ## 验证
 
