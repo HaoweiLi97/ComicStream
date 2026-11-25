@@ -100,6 +100,54 @@ thumbnail_end   = thumbnail_start + last_thumbnail.offset + last_thumbnail.size
 
 `meta_size > 0` 时，`meta_start` 处存放无 BOM 的 UTF-8 JSON 对象。阅读器可用 `title` 显示书名，用 `readingDirection` 设置翻页方向。方向可取 `ltr`（从左向右）、`rtl`（从右向左）或 `ttb`（从上到下）。ComicStream 在方向缺省或无法识别时使用 `ltr`。阅读器忽略未知字段。二进制索引决定页顺序、尺寸、编码和字节位置。
 
+#### 可选字段命名约定
+
+需要在工具间交换书目信息时，建议采用下表中的名称和 JSON 类型。所有字段均可省略，也可以只写自定义字段。推荐字段采用小驼峰命名，如 `chapterNumber`。阅读器遇到无法识别的名称或类型时可跳过该字段，继续读取其余内容。
+
+| 字段 | JSON 类型 | 含义 |
+| --- | --- | --- |
+| `title` | 字符串 | 当前文件的显示标题。单章文件可用章节名。 |
+| `readingDirection` | 字符串 | 翻页方向，取值见上文。 |
+| `manga.title` | 字符串 | 整部作品的名称。 |
+| `manga.author`、`manga.artist` | 字符串 | 文字作者、绘画作者的署名。 |
+| `manga.description`、`manga.status` | 字符串 | 作品简介、连载状态。 |
+| `manga.tags` | 字符串数组 | 作品标签，每项一个。 |
+| `manga.source`、`manga.url` | 字符串 | 来源名称、作品在来源中的地址。 |
+| `manga.originalTitle`、`manga.alternateTitles` | 字符串 / 字符串数组 | 原名（字符串）和别名（字符串数组）。 |
+| `manga.contributors` | 对象数组 | 多人署名列表。每项用 `name` 写署名，`role` 写职责，如 `writer`、`artist`、`colorist`、`translator` 或 `editor`。一人可以有多项职责，按职责分别列出。 |
+| `manga.publisher`、`manga.imprint` | 字符串 | 本版本的出版社及其出版品牌。 |
+| `manga.publication`、`manga.originalLanguage`、`manga.language` | 字符串 | 连载刊物或平台、作品原文语言、本版本语言。语言建议使用 BCP 47 标记，如 `ja`、`zh-Hans`。 |
+| `manga.startDate`、`manga.endDate` | 字符串 | 作品开始、结束连载的日期。日期可按已知精度写为 `YYYY`、`YYYY-MM` 或 `YYYY-MM-DD`。 |
+| `chapters` | 对象数组 | 当前文件收录的卷或话，每个条目对应一卷或一话。 |
+| `chapters[].type` | 字符串 | 每个条目在卷和话中二选一。`volume` 表示卷，`chapter` 表示话。旧记录省略类型时按话理解。 |
+| `chapters[].volumeNumber` | 数值 | 仅用于卷条目，表示卷号。 |
+| `chapters[].releaseDate`、`chapters[].isbn` | 字符串 | 该卷或话的发行日期，以及该出版物获配的 ISBN。ISBN 用字符串保留前导零、连字符或校验位 X。 |
+| `chapters[].title`、`chapters[].url` | 字符串 | 该卷或话的标题及其来源地址。 |
+| `chapters[].chapterNumber` | 数值 | 仅用于话条目，表示话号，可带小数。没有编号的番外可以只写标题。 |
+| `chapters[].scanlator` | 字符串 | 章节的翻译或制作组署名。 |
+| `comicInfo` | 字符串 | 随文件保存的 ComicInfo XML 原文。 |
+
+```json
+{
+  "title": "海边来信 · 第 1 卷",
+  "manga": {
+    "title": "海边来信",
+    "description": "两位少年通过一座旧灯塔交换信件。",
+    "tags": ["日常", "友情"],
+    "author": "林舟",
+    "artist": "叶岚",
+    "contributors": [{ "name": "许晴", "role": "colorist" }],
+    "publisher": "青屿出版社",
+    "publication": "月刊潮声",
+    "startDate": "2025-04"
+  },
+  "chapters": [
+    { "type": "volume", "volumeNumber": 1, "title": "潮起" }
+  ],
+  "我的书架": "周末阅读"
+}
+```
+
 ### 读取与校验顺序
 
 1. 取得文件总长和前 32 字节。检查魔数、版本、标志位、计数、索引位置和长度等式。用足够宽的整数计算长度，再与字段范围、文件总长和客户端读取预算比较。JS/TS 对文件偏移、总长和 Range 端点用 `BigInt`，转换为缓冲区内的局部下标前检查可表示范围。

@@ -98,6 +98,54 @@ A 16-byte little-endian descriptor follows the base header. At file offsets 32, 
 
 If `meta_size` is positive, the section at `meta_start` contains a UTF-8 JSON object without a byte order mark. Readers may display `title` and may use `readingDirection` to configure navigation. Defined direction values are `ltr` (left to right), `rtl` (right to left), and `ttb` (top to bottom). ComicStream defaults to `ltr` when the field is absent or unrecognized. Ignore unknown keys. The binary tables define page order, dimensions, codecs, and offsets.
 
+### Optional field naming conventions
+
+For tools that exchange catalog information, the following field names and JSON types are recommended. Authors may omit any field or use only custom fields. Recommended names use lower camel case, such as `chapterNumber`. Readers can skip a field with an unfamiliar name or type and continue reading the rest.
+
+| Field | JSON type | Meaning |
+| --- | --- | --- |
+| `title` | String | Display title of this file. A single-chapter file may use the chapter title. |
+| `readingDirection` | String | Navigation direction using the values above. |
+| `manga.title` | String | Title of the work as a whole. |
+| `manga.author`, `manga.artist` | String | Writing and artwork credits, respectively. |
+| `manga.description`, `manga.status` | String | Synopsis and publication status, respectively. |
+| `manga.tags` | Array of strings | One tag per entry. |
+| `manga.source`, `manga.url` | String | Source name and address of the work at that source. |
+| `manga.originalTitle`, `manga.alternateTitles` | String / array of strings | Original title (string) and alternative titles (array of strings). |
+| `manga.contributors` | Array of objects | Detailed credits. Each entry gives a `name` and a `role`, such as `writer`, `artist`, `colorist`, `translator`, or `editor`. Repeat a name for additional roles. |
+| `manga.publisher`, `manga.imprint` | String | Publisher and publishing imprint of this edition. |
+| `manga.publication`, `manga.originalLanguage`, `manga.language` | String | Serialization magazine or platform, original language, and language of this edition. Use BCP 47 language tags such as `ja` or `zh-Hans`. |
+| `manga.startDate`, `manga.endDate` | String | Start and end of serialization. Dates can use `YYYY`, `YYYY-MM`, or `YYYY-MM-DD` according to known precision. |
+| `chapters` | Array of objects | Volumes or chapters included in this file, one entry per volume or chapter. |
+| `chapters[].type` | String | Each entry represents exactly one of two types. Use `volume` for a collected volume and `chapter` for an installment. An older entry without a type is interpreted as a chapter. |
+| `chapters[].volumeNumber` | Number | Volume number, used only on volume entries. |
+| `chapters[].releaseDate`, `chapters[].isbn` | String | Release date of this volume or chapter and its ISBN if assigned. A string preserves leading zeros, hyphens, and the check digit X. |
+| `chapters[].title`, `chapters[].url` | String | Title and source address of the volume or chapter. |
+| `chapters[].chapterNumber` | Number | Installment number, used only on chapter entries. Fractional numbers are allowed. An unnumbered special can supply just a title. |
+| `chapters[].scanlator` | String | Translation or scanlation group credit for the chapter. |
+| `comicInfo` | String | ComicInfo XML text included with the file. |
+
+```json
+{
+  "title": "海边来信 · 第 1 卷",
+  "manga": {
+    "title": "海边来信",
+    "description": "两位少年通过一座旧灯塔交换信件。",
+    "tags": ["日常", "友情"],
+    "author": "林舟",
+    "artist": "叶岚",
+    "contributors": [{ "name": "许晴", "role": "colorist" }],
+    "publisher": "青屿出版社",
+    "publication": "月刊潮声",
+    "startDate": "2025-04"
+  },
+  "chapters": [
+    { "type": "volume", "volumeNumber": 1, "title": "潮起" }
+  ],
+  "我的书架": "周末阅读"
+}
+```
+
 ## Validation and recovery
 
 1. Read the file length and header. Validate the magic, version, flags, counts, and index bounds before reading the tables. Use integers that can represent unsigned 64-bit offsets, such as `BigInt` in JavaScript.
