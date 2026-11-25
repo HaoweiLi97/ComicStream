@@ -174,3 +174,32 @@ with ZipFile(animated_archive, "w") as bundle:
 result = subprocess.run(cli + ["--cbz", str(animated_archive), "-o", str(fallback_output)], capture_output=True)
 assert result.returncode == 1 and b"single image frame" in result.stderr
 print("PASS: original bytes for all four codecs, WebP fallback, and single-frame validation.")
+
+# The cover is independent of the body and the optional page previews.
+for preview_args in ([], ["--thumbnails"]):
+    target = CACHE / "cover-fixture.cstr"
+    subprocess.run([sys.executable, str(ROOT / "pack.py"), "--cbz", str(archive),
+                    "--cover-page", "2", "--cover-width", "100", "--cover-height", "100",
+                    "--cover-kib", "4", *preview_args, "-o", str(target)], check=True)
+    data = target.read_bytes()
+    assert unpack_from("<HH", data, 4) == (1, 3 if preview_args else 2)
+    start, size, width, height = unpack_from("<QIHH", data, 32)
+    assert start == 48 + sum(unpack_from("<II", data, 24)) and unpack_from("<Q", data, 16) == (48,) and size <= 4096 and 0 < width <= 100 and 0 < height <= 100
+    with Image.open(BytesIO(data[start:start + size])) as cover_image:
+        assert cover_image.format == "WEBP" and cover_image.size == (width, height)
+    original = data
+    for option, value in [("--cover-width", "2561"), ("--cover-height", "0"),
+                          ("--cover-kib", "2049"), ("--cover-quality", "101")]:
+        result = subprocess.run([sys.executable, str(ROOT / "pack.py"), "--cbz", str(archive),
+                                 option, value, "-o", str(target)], capture_output=True)
+        assert result.returncode != 0 and target.read_bytes() == original
+
+custom = CACHE / "custom-art.png"
+with Image.new("RGB", (37, 53), "purple") as artwork:
+    artwork.save(custom)
+target = CACHE / "external-cover.cstr"
+subprocess.run([sys.executable, str(ROOT / "pack.py"), "--cbz", str(archive), "--cover-file",
+                str(custom), "-o", str(target)], check=True)
+data = target.read_bytes()
+start, size, width, height = unpack_from("<QIHH", data, 32)
+assert (width, height) == (37, 53) and start == 48 + sum(unpack_from("<II", data, 24)) and unpack_from("<Q", data, 16) == (48,)

@@ -21,7 +21,11 @@ HEADER = Struct("<4sHHIIQII")
 PAGE = Struct("<IIII")
 CHUNK = Struct("<IB3xQI")
 THUMBNAIL = Struct("<HHIQ")
+COVER = Struct("<QIHH")
+COVER_MAX_EDGE = 2560
+COVER_MAX_KIB = 2048
 FLAG_THUMBNAILS = 1
+FLAG_COVER = 2
 CODECS = {"WEBP": 1, "AVIF": 2, "PNG": 3, "JPEG": 4}
 READING_DIRECTIONS = ("ltr", "rtl", "ttb")
 THUMBNAIL_BYTES = 256 * 1024
@@ -156,11 +160,50 @@ def original_bytes(image, source, size, max_height):
     return data
 
 
+def encode_cover(image, width, height, quality, budget):
+    while True:
+        scale = min(1, Fraction(width, image.width), Fraction(height, image.height))
+        size = (max(1, int(image.width * scale)), max(1, int(image.height * scale)))
+        with image.resize(size, Image.Resampling.LANCZOS) as resized, BytesIO() as buffer:
+            resized.info.clear()
+            resized.save(buffer, "WEBP", quality=quality)
+            if buffer.tell() <= budget:
+                return buffer.getvalue(), size
+        if size == (1, 1):
+            raise ValueError("Cover byte budget is too small")
+        width, height = (max(1, n * 3 // 4) for n in size)
+
+
 def pack(output, inputs, *, strip_height=0, quality=None, lossless=False, metadata=None,
-         archive=None, thumbnails=False, reading_direction=None, webp=False):
+         archive=None, thumbnails=False, reading_direction=None, webp=False, cover=False,
+         cover_file=None, cover_page=None, cover_width=None, cover_height=None, cover_kib=None, cover_quality=None):
     page_record_size = PAGE.size + (THUMBNAIL.size if thumbnails else 0)
     if not inputs:
         raise ValueError("A nonempty list of pages is required")
+    cover = cover or any(value is not None for value in (
+        cover_file, cover_page, cover_width, cover_height, cover_kib, cover_quality))
+    if cover_page is not None and (cover_file is not None or not 1 <= cover_page <= len(inputs)):
+        raise ValueError("Choose a cover file or a valid one-based cover page")
+    cover_width = 640 if cover_width is None else cover_width
+    cover_height = 909 if cover_height is None else cover_height
+    cover_kib = 128 if cover_kib is None else cover_kib
+    cover_quality = 85 if cover_quality is None else cover_quality
+    if not (1 <= cover_width <= COVER_MAX_EDGE and 1 <= cover_height <= COVER_MAX_EDGE
+            and 1 <= cover_kib <= COVER_MAX_KIB and 0 <= cover_quality <= 100):
+        raise ValueError("Cover dimensions must be 1–2560, budget 1–2048 KiB, and quality 0–100")
+    cover_data = b""
+    cover_size = (0, 0)
+    if cover_file is not None:
+        if cover_file.resolve() == output.resolve():
+            raise ValueError("The output path is also the cover file")
+        with cover_file.open("rb") as source:
+            if fstat(source.fileno()).st_size > 32 * 1024 * 1024:
+                raise ValueError("Cover input exceeds 32 MiB")
+            with Image.open(source) as image:
+                if image.width * image.height > 32_000_000 or getattr(image, "n_frames", 1) != 1:
+                    raise ValueError("Cover input must be a single frame of at most 32 million pixels")
+                ImageOps.exif_transpose(image, in_place=True)
+                cover_data, cover_size = encode_cover(image, cover_width, cover_height, cover_quality, cover_kib * 1024)
     max_chunks = (READER_INDEX_BYTES - page_record_size * len(inputs)) // CHUNK.size
     if len(inputs) > max_chunks:
         raise ValueError(f"Index exceeds ComicStream's reading limit ({READER_INDEX_BYTES} bytes)")
@@ -195,7 +238,7 @@ def pack(output, inputs, *, strip_height=0, quality=None, lossless=False, metada
             thumbnail_table = bytearray()
             chunk_count = 0
             offset = 0
-            for path in inputs:
+            for number, path in enumerate(inputs, 1):
                 with warnings.catch_warnings():
                     warnings.simplefilter("error", Image.DecompressionBombWarning)
                     label = path if archive is None else path.filename
@@ -217,6 +260,8 @@ def pack(output, inputs, *, strip_height=0, quality=None, lossless=False, metada
                             raise ValueError(f"Image dimensions are too large: {label}")
                         if chunk_count >= max_chunks:
                             raise ValueError(f"Index exceeds ComicStream's reading limit ({READER_INDEX_BYTES} bytes)")
+                        if cover and cover_file is None and number == (cover_page or 1):
+                            cover_data, cover_size = encode_cover(image, cover_width, cover_height, cover_quality, cover_kib * 1024)
                         if previews is not None:
                             write_thumbnail(image, previews, thumbnail_table)
                         if original is not None:
@@ -248,16 +293,22 @@ def pack(output, inputs, *, strip_height=0, quality=None, lossless=False, metada
                         page_table.extend(PAGE.pack(width, height, first_chunk, chunk_count - first_chunk))
             index_size = len(page_table) + len(chunk_table) + len(thumbnail_table)
             preview_size = previews.tell() if previews is not None else 0
-            if HEADER.size + index_size + len(meta) + offset + preview_size > (1 << 64) - 1:
+            header_size = HEADER.size + (COVER.size if cover else 0)
+            cover_offset = header_size + index_size + len(meta)
+            if cover_offset + len(cover_data) + offset + preview_size > (1 << 64) - 1:
                 raise ValueError("File exceeds the CSTR size limit")
             with NamedTemporaryFile(dir=output.parent, delete=False) as destination:
                 temporary_output = Path(destination.name)
-                destination.write(HEADER.pack(b"CSTR", 1, FLAG_THUMBNAILS if thumbnails else 0,
-                                              len(inputs), chunk_count, HEADER.size, index_size, len(meta)))
+                flags = (FLAG_THUMBNAILS if thumbnails else 0) | (FLAG_COVER if cover else 0)
+                destination.write(HEADER.pack(b"CSTR", 1, flags,
+                                              len(inputs), chunk_count, header_size, index_size, len(meta)))
+                if cover:
+                    destination.write(COVER.pack(cover_offset, len(cover_data), *cover_size))
                 destination.write(page_table)
                 destination.write(chunk_table)
                 destination.write(thumbnail_table)
                 destination.write(meta)
+                destination.write(cover_data)
                 payload.seek(0)
                 copyfileobj(payload, destination, length=1024 * 1024)
                 if previews is not None:
@@ -280,6 +331,14 @@ def main():
     cli.add_argument("--lossless", action="store_true", help="Encode body images as lossless WebP")
     cli.add_argument("--metadata", type=Path, help="Path to a UTF-8 JSON object")
     cli.add_argument("--thumbnails", action="store_true", help="Embed optional page thumbnails in CSTR v1")
+    cli.add_argument("--cover", action="store_true", help="Embed the first page as a separate CSTR v1 cover")
+    source = cli.add_mutually_exclusive_group()
+    source.add_argument("--cover-file", type=Path, help="Generate the cover from an external image")
+    source.add_argument("--cover-page", type=int, help="Generate the cover from this page (numbered from 1)")
+    cli.add_argument("--cover-width", type=int, help="Target bounding box width (default 640, max 2560)")
+    cli.add_argument("--cover-height", type=int, help="Target bounding box height (default 909, max 2560)")
+    cli.add_argument("--cover-kib", type=int, help="Encoded cover budget in KiB (default 128, max 2048)")
+    cli.add_argument("--cover-quality", type=int, help="Cover WebP quality 0–100 (default 85)")
     cli.add_argument("--reading-direction", choices=READING_DIRECTIONS,
                      help="Set the readingDirection metadata field")
     cli.add_argument("--manifest", type=Path,
@@ -316,7 +375,10 @@ def main():
                 return
             count = pack(args.output, inputs, strip_height=args.strip_height, quality=args.quality,
                          lossless=args.lossless, metadata=metadata, archive=archive,
-                         thumbnails=args.thumbnails, reading_direction=args.reading_direction, webp=args.webp)
+                         thumbnails=args.thumbnails, reading_direction=args.reading_direction, webp=args.webp,
+                         cover=args.cover, cover_file=args.cover_file, cover_page=args.cover_page,
+                         cover_width=args.cover_width, cover_height=args.cover_height,
+                         cover_kib=args.cover_kib, cover_quality=args.cover_quality)
     except (OSError, ValueError, BadZipFile, RuntimeError,
             Image.DecompressionBombError, Image.DecompressionBombWarning) as error:
         cli.exit(1, f"cstr: {error}\n")

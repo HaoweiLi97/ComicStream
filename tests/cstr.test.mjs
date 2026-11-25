@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
-import { FileReplaced, fileSource, FormatError, LIMITS, openHttp, RangeErrorResponse, RangeSessionError, readComic } from "../dist/cstr.js";
+import { FileReplaced, fileSource, FormatError, LIMITS, openHttp, RangeErrorResponse, RangeSessionError, readComic, readCover } from "../dist/cstr.js";
 
 const spec = readFileSync(new URL("../CSTR-v1.md", import.meta.url), "utf8");
 const sample = Buffer.from(spec.match(/^\x60{3}hex\r?\n([\da-f\r\n]+)^\x60{3}/m)[1].replace(/\s/g, ""), "hex");
@@ -227,3 +227,73 @@ test("an empty 416 invalidates the range session", async () => {
   const start = BigInt(LIMITS.prefix);
   await assert.rejects(source.read(start, start + 1n), RangeSessionError);
 });
+
+test("v1 cover is independent of thumbnails and fetched without the page index", async () => {
+  for (const base of [sample, withThumbnails().data]) {
+    const image = sample.subarray(142, 178);
+    const offset = base.length + 16;
+    const data = Buffer.concat([base.subarray(0, 32), Buffer.alloc(16), base.subarray(32), image]);
+    data.writeUInt16LE(base.readUInt16LE(6) | 2, 6);
+    data.writeBigUInt64LE(48n, 16);
+    data.writeBigUInt64LE(BigInt(offset), 32);
+    data.writeUInt32LE(image.length, 40);
+    data.writeUInt16LE(2, 44);
+    data.writeUInt16LE(2, 46);
+    const reads = [];
+    const source = { size: BigInt(data.length), async read(a, b) {
+      reads.push([Number(a), Number(b)]);
+      return data.subarray(Number(a), Number(b));
+    }};
+    assert.deepEqual(Buffer.from((await readCover(source)).bytes), image);
+    assert.deepEqual(reads, [[0, 32], [32, 48], [offset, data.length]]);
+    const comic = await readComic(source);
+    assert.equal(comic.pages.length, 2);
+    assert.equal(comic.thumbnails.length, base === sample ? 0 : 2);
+    assert.deepEqual(Buffer.from((await comic.readCover()).bytes), image);
+    data.writeUInt16LE(3, 44);
+    await assert.rejects(comic.readCover(), FormatError);
+    data.writeUInt32LE(2097153, 40);
+    await assert.rejects(readCover(source), FormatError);
+    assert.equal((await readComic(source)).chunks.length, 3);
+  }
+  assert.equal(await readCover(fileSource(new Blob([sample]))), undefined);
+});
+
+for (const legacy of [false, true]) {
+  test(`HTTP cover reads with the ${legacy ? "legacy leading" : "indexed"} layout`, async () => {
+    for (const pad of [0, LIMITS.prefix]) {
+      const image = Buffer.concat([sample.subarray(142, 178), Buffer.from("JUNK"), Buffer.alloc(4), Buffer.alloc(pad)]);
+      image.writeUInt32LE(pad, 40);
+      image.writeUInt32LE(image.length - 8, 4);
+      const base = withThumbnails(LIMITS.prefix).data;
+      const split = legacy ? 32 : 32 + base.readUInt32LE(24) + base.readUInt32LE(28);
+      const start = split + 16;
+      const end = start + image.length;
+      const data = Buffer.concat([base.subarray(0, 32), Buffer.alloc(16), base.subarray(32, split), image, base.subarray(split)]);
+      data.writeUInt16LE(3, 6);
+      data.writeBigUInt64LE(legacy ? BigInt(end) : 48n, 16);
+      data.writeBigUInt64LE(BigInt(start), 32);
+      data.writeUInt32LE(image.length, 40);
+      data.writeUInt16LE(2, 44);
+      data.writeUInt16LE(2, 46);
+      const requests = [];
+      const source = await openHttp(url, { fetch: async (_url, { headers }) => {
+        requests.push(headers.get("Range"));
+        return rangeResponse(data, headers);
+      }});
+      if (!legacy) {
+        const comic = await readComic(source);
+        assert.deepEqual(await comic.metadata(), { title: "样包" });
+        assert.deepEqual(requests, ["bytes=0-65535"]);
+        assert.equal(comic.chunks[0].start, BigInt(end));
+        assert.deepEqual(data.subarray(end, end + 36), sample.subarray(142, 178));
+      }
+      assert.deepEqual(Buffer.from((await readCover(source)).bytes), image);
+      assert.deepEqual(requests, pad ? ["bytes=0-65535", `bytes=65536-${end - 1}`] : ["bytes=0-65535"]);
+      const comic = await readComic(source);
+      assert.equal(comic.pages.length, 2);
+      assert.equal(comic.thumbnails.length, 2);
+      assert.deepEqual(Buffer.from((await comic.readCover()).bytes), image);
+    }
+  });
+}

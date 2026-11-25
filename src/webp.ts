@@ -7,9 +7,7 @@ export function bitmapCost(width: number, height: number) {
   return width * height * 4;
 }
 
-export async function decodeWebP(
-  bytes: Uint8Array<ArrayBuffer>, width: number, height: number, outputWidth = width, outputHeight = height,
-) {
+export function validateWebP(bytes: Uint8Array<ArrayBuffer>, width: number, height: number) {
   bitmapCost(width, height);
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
   const invalid = () => new FormatError("WebP 损坏或尺寸与索引不符");
@@ -46,6 +44,12 @@ export async function decodeWebP(
     }
   }
   if (!frame || offset !== bytes.length) throw invalid();
+}
+
+export async function decodeWebP(
+  bytes: Uint8Array<ArrayBuffer>, width: number, height: number, outputWidth = width, outputHeight = height,
+) {
+  validateWebP(bytes, width, height);
   const options: ImageBitmapOptions = { imageOrientation: "none" };
   if (outputWidth !== width || outputHeight !== height) {
     options.resizeWidth = outputWidth;
@@ -55,5 +59,5 @@ export async function decodeWebP(
   const bitmap = await createImageBitmap(new Blob([bytes], { type: "image/webp" }), options);
   if (bitmap.width === outputWidth && bitmap.height === outputHeight) return bitmap;
   bitmap.close();
-  throw invalid();
+  throw new FormatError("WebP 解码尺寸与索引不符");
 }
