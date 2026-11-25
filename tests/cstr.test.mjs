@@ -46,18 +46,92 @@ test("v1 reference sample preserves page order and exact chunk ranges", async ()
     [0, 0, 142n], [0, 2, 178n], [1, 0, 214n],
   ]);
   assert.deepEqual(await comic.metadata(), { title: "样包" });
+  assert.deepEqual(await comic.readThumbnails(), []);
 });
 
-test("rejects truncated files, extra bytes, bad offsets and incorrect block heights", async () => {
+test("rejects truncated files, extra bytes, bad offsets, incorrect heights and unsupported headers", async () => {
   const wrongOffset = Buffer.from(sample);
   wrongOffset.writeBigUInt64LE(1n, 72);
   const wrongHeight = Buffer.from(sample);
   wrongHeight.writeUInt32LE(1, 64);
   const badVersion = Buffer.from(sample);
-  badVersion.writeUInt16LE(2, 4);
+  badVersion.writeUInt16LE(0, 4);
+  const unknownFlag = Buffer.from(sample);
+  unknownFlag.writeUInt16LE(0x8001, 6);
   for (const bytes of [sample.subarray(0, -1), Buffer.concat([sample, Buffer.alloc(1)]),
-    wrongOffset, wrongHeight, badVersion]) {
+    wrongOffset, wrongHeight, badVersion, unknownFlag]) {
     await assert.rejects(readComic(fileSource(new Blob([bytes]))), FormatError);
+  }
+});
+
+function withThumbnails(paddingBytes = 0) {
+  const indexEnd = 32 + 92;
+  const firstImage = sample.subarray(142, 178);
+  const secondImage = sample.subarray(214);
+  const entries = Buffer.alloc(32);
+  for (const [offset, image] of [[0, firstImage], [16, secondImage]]) {
+    entries.writeUInt16LE(2, offset);
+    entries.writeUInt16LE(2, offset + 2);
+    entries.writeUInt32LE(image.length, offset + 4);
+  }
+  entries.writeBigUInt64LE(BigInt(firstImage.length), 24);
+  const padding = Buffer.alloc(paddingBytes);
+  const data = Buffer.concat([sample.subarray(0, indexEnd), entries, sample.subarray(indexEnd),
+    padding, firstImage, secondImage]);
+  data.writeUInt16LE(1, 6);
+  data.writeUInt32LE(124, 24);
+  data.writeUInt32LE(36 + padding.length, 120);
+  return { data, thumbnailTable: indexEnd, firstImage, secondImage };
+}
+
+test("v1 with thumbnails reads one complete image or the whole section in one Range", async () => {
+  const { data, thumbnailTable, firstImage, secondImage } = withThumbnails(LIMITS.prefix);
+  const start = data.length - firstImage.length - secondImage.length;
+  const requests = [];
+  const source = await openHttp(url, { fetch: async (_url, { headers }) => {
+    requests.push(headers.get("Range"));
+    return rangeResponse(data, headers);
+  } });
+  const comic = await readComic(source);
+  assert.deepEqual(requests, ["bytes=0-65535"]);
+  assert.deepEqual(Buffer.from(await comic.readThumbnail(0)), firstImage);
+  assert.deepEqual((await comic.readThumbnails()).map(bytes => Buffer.from(bytes)), [firstImage, secondImage]);
+  assert.deepEqual(requests.slice(1), [`bytes=${start}-${start + firstImage.length - 1}`,
+    `bytes=${start}-${data.length - 1}`]);
+  await assert.rejects(comic.readThumbnails(1, 3), FormatError);
+  for (const invalid of [data.subarray(0, -1), Buffer.concat([data, Buffer.alloc(1)])]) {
+    await assert.rejects(readComic(fileSource(new Blob([invalid]))), FormatError);
+  }
+  data.writeBigUInt64LE(1n, thumbnailTable + 8);
+  await assert.rejects(readComic(fileSource(new Blob([data]))), FormatError);
+});
+
+test("reader mode keeps the body when the thumbnail index or section is invalid", async () => {
+  const { data, thumbnailTable, firstImage, secondImage } = withThumbnails();
+  const thumbnailStart = data.length - firstImage.length - secondImage.length;
+  const badRecord = Buffer.from(data);
+  // Damage the second entry so the first entry cannot leak through recovery.
+  badRecord.writeUInt16LE(0, thumbnailTable + 16);
+  for (const bytes of [badRecord, data.subarray(0, -1), Buffer.concat([data, Buffer.alloc(1)])]) {
+    const source = fileSource(new Blob([bytes]));
+    await assert.rejects(readComic(source), FormatError);
+    const comic = await readComic(source, undefined, { tolerateInvalidThumbnails: true });
+    assert.ok(comic.thumbnailError instanceof FormatError);
+    assert.deepEqual(await comic.readThumbnails(), []);
+    assert.deepEqual(await comic.metadata(), { title: "样包" });
+    assert.deepEqual(comic.chunks.map(chunk => chunk.start), [174n, 210n, 246n]);
+    assert.deepEqual(Buffer.from(await source.read(comic.chunks[2].start, BigInt(thumbnailStart))), secondImage);
+  }
+});
+
+test("thumbnail recovery still rejects invalid body indices and truncated body data", async () => {
+  const { data, thumbnailTable, firstImage, secondImage } = withThumbnails();
+  const truncatedBody = Buffer.from(data.subarray(0, data.length - firstImage.length - secondImage.length - 1));
+  data.writeBigUInt64LE(1n, 72);
+  data.writeUInt16LE(0, thumbnailTable);
+  for (const bytes of [data, truncatedBody, sample.subarray(0, -1)]) {
+    await assert.rejects(readComic(fileSource(new Blob([bytes])), undefined,
+      { tolerateInvalidThumbnails: true }), /块/);
   }
 });
 

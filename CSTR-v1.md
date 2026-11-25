@@ -1,96 +1,121 @@
-# `.cstr` v1 设计审查与实施方案
+# CSTR v1 binary specification
 
-建议将 `.cstr` 定义为面向随机读取的漫画包。文件依次存放 32 字节头、定长页表和块表、可选 JSON 元数据、图像块。原草案按尚未发布处理，将 `ChunkEntry` 的前 4 字节由 `page_index` 改为 `height`。页表已经记录块归属，块高则让阅读器在下载图像前预留布局空间，直接定位视口内的条漫分段。
+English · [简体中文](CSTR-v1.zh-CN.md)
 
-| 优先级 | 审查发现 | v1 决策 |
-| --- | --- | --- |
-| P0 | 索引只能定位整页，无法确定页内某个视口对应的块 | 每块记录像素高度，按整页宽度从上到下排列 |
-| P0 | 格式草案没有定义块的归属顺序、空洞、尾随数据和编码约束 | 固定页序、块序、紧凑排列和精确文件长度，图像按独立静态图片解码 |
-| P0 | 多次 HTTP Range 请求可能混用不同版本，`200` 也可能被误当成块 | 默认发布到不可变 URL，并校验每个 `206` 的区间和长度 |
-| P1 | 按段串行读取会增加首屏往返，过量预读会挤占带宽和解码内存 | 合读首段，复用已到达字节，分别限制网络并发和解码缓存 |
-
-## 1. 二进制规范
-
-偏移从零开始。所有多字节整数均为无符号小端整数，逐字段序列化。记录之间紧密排列。页号和块号均从零开始。
-
-### 文件头，32 字节
-
-| 文件偏移 | 类型 | 字段 | v1 约束 |
-| ---: | --- | --- | --- |
-| 0 | `u8[4]` | `magic` | ASCII `CSTR`，即 `43 53 54 52` |
-| 4 | `u16` | `version` | `1` |
-| 6 | `u16` | `flags` | `0` |
-| 8 | `u32` | `page_count` | 至少 `1` |
-| 12 | `u32` | `chunk_count` | 至少等于 `page_count` |
-| 16 | `u64` | `index_offset` | `32` |
-| 24 | `u32` | `index_size` | `16 × page_count + 20 × chunk_count` |
-| 28 | `u32` | `meta_size` | `0` 表示无元数据，其余为 UTF-8 字节数 |
-
-### 页表，单条 16 字节
-
-页表从 `index_offset` 开始，按阅读顺序存放 `page_count` 条记录。
-
-| 条内偏移 | 类型 | 字段 | 含义 |
-| ---: | --- | --- | --- |
-| 0 | `u32` | `width` | 页宽，正整数，单位为像素 |
-| 4 | `u32` | `height` | 页高，正整数，单位为像素 |
-| 8 | `u32` | `first_chunk` | 该页第一块在块表中的下标 |
-| 12 | `u32` | `chunk_count` | 该页块数，正整数 |
-
-首个 `first_chunk` 为 `0`。后续每页的 `first_chunk` 等于前页的 `first_chunk + chunk_count`，末页的区间右端等于文件头的 `chunk_count`。
-
-### 块表，单条 20 字节
-
-块表从 `index_offset + 16 × page_count` 开始，按页序、页内从上到下依次存放 `chunk_count` 条记录。
-
-| 条内偏移 | 类型 | 字段 | 含义 |
-| ---: | --- | --- | --- |
-| 0 | `u32` | `height` | 块高，正整数，单位为像素 |
-| 4 | `u8` | `codec` | `1` WebP，`2` AVIF，`3` PNG |
-| 5 | `u8[3]` | `reserved` | 三字节均为 `0` |
-| 8 | `u64` | `offset` | 相对 Payload 起点的字节偏移 |
-| 16 | `u32` | `size` | 压缩图像字节数，正整数 |
-
-每块都是一份完整的单帧图像，图像像素宽度等于所属页的 `width`，像素高度等于块表的 `height`。编码前应用源图像的方向信息，块的显示方向以编码后的像素为准。每页块高相加必须等于该页的 `height`。第 `i` 块的页内起始 `y` 等于同页前面所有块的高度之和，末端为 `y + height`。相邻块共用这条边界，阅读器缩放时应统一计算边界位置，避免逐块取整产生缝隙。
-
-WebP 是 MVP 的写出格式，也是 v1 阅读器必需支持的解码格式。AVIF 和 PNG 是可选解码能力。遇到未实现的已分配编码，按块报告不支持，保留已读索引和其他块的可读性。其余 `codec` 值为非法值。
-
-### 元数据与 Payload
-
-元数据从 `index_offset + index_size` 开始。`meta_size > 0` 时，该区间必须是无 BOM 的 UTF-8 JSON，顶层为对象。字段可按需扩展，未知键忽略。元数据仅供展示，页顺序、尺寸、编码和定位均由二进制索引决定。
+CSTR stores the index at the front of the file so a reader can locate individual pages, image chunks, and thumbnails by byte range.
 
 ```text
-payload_start = index_offset + index_size + meta_size
-start         = payload_start + chunk.offset
-end           = start + chunk.size
-file_size     = payload_start + 最后一块的 offset + 最后一块的 size
+[Header][Page table][Chunk table][Thumbnail table*][JSON metadata*][Image chunks][Thumbnail data*]
+
+* Optional. Header flag bit 0 controls both thumbnail sections.
 ```
 
-块的文件区间为 `[start, end)`。首块 `offset` 为 `0`，后续每块的 `offset` 等于前一块的 `offset + size`，最后一块结束于文件末尾。额外填充和尾随内容均视为格式错误。
+All multi-byte integers are unsigned and little-endian. Records are packed without padding. Page and chunk indices are zero-based. Byte intervals are half-open unless written as an HTTP Range.
 
-### 读取与校验顺序
+## File header
 
-1. 取得文件总长和前 32 字节。检查魔数、版本、标志位、计数、索引位置和长度等式。用足够宽的整数计算长度，再与字段范围、文件总长和客户端读取预算比较。JS/TS 对文件偏移、总长和 Range 端点用 `BigInt`，转换为缓冲区内的局部下标前检查可表示范围。
-2. 取齐索引，校验页连续性、块尺寸和编码、块偏移连续性、逐页块高总和以及期望文件总长。对截断、偏移越界和未知版本报告格式错误。元数据可独立读取，且不得阻塞首块请求。解析元数据时校验 UTF-8 和 JSON 对象，元数据错误单独报告，支持继续显示已验证的图像。
-3. 只为所需块取正文。在完整解码前检查图像头声明的像素尺寸和客户端解码预算，解码后核对尺寸并显示。单块损坏时报告该块错误，并允许读取其他已通过索引校验的块。索引、元数据、单块传输和总解码内存的预算由实现分别配置。
+| File offset | Type | Field | Value or constraint |
+| ---: | --- | --- | --- |
+| 0 | `u8[4]` | `magic` | ASCII `CSTR` (`43 53 54 52`) |
+| 4 | `u16` | `version` | `1` |
+| 6 | `u16` | `flags` | Bit 0 indicates thumbnails. All other bits must be zero. |
+| 8 | `u32` | `page_count` | At least 1 |
+| 12 | `u32` | `chunk_count` | At least `page_count` |
+| 16 | `u64` | `index_offset` | `32` |
+| 24 | `u32` | `index_size` | Combined byte length of the tables |
+| 28 | `u32` | `meta_size` | UTF-8 byte length of metadata, or zero |
 
-## 2. HTTP 流式读取
+```text
+index_size = 16 × page_count + 20 × chunk_count
+           + (16 × page_count if flags & 1, otherwise 0)
+meta_start = index_offset + index_size
+body_start = meta_start + meta_size
+```
 
-- **首次读取**发送 `Range: bytes=0-65535`。允许文件在该范围内提前结束。若索引跨出首段，只补齐索引中缺失的字节。目标块如果部分命中首段，只补齐剩余部分。整个索引和首块都命中时，一次请求即可开始解码。64 KiB 是首轮测试值，可按真实样本调整。
-- **按需读取**将 `[start, end)` 转为 `Range: bytes=start-(end-1)`。每次 `206` 都校验 `Content-Range` 的起点、终点、总长和实际正文长度，按请求端点与文件末尾的较小值计算期望终点。范围相邻时可用一个连续 Range 合并，再按块边界拆开。
-- **文件更新**默认给每份内容分配唯一且稳定的 URL。可变 URL 需要在首次 `206` 取得强 ETag，后续请求携带同一个 `If-Range` 并校验已返回的验证器。每个 `206` 的最终响应 URL 必须与首次 `206` 一致，重定向目标变化时停止拼接并提示重新打开。缺少可用的强验证器时，使用同一响应提供的整包数据或退出流式模式。
-- **异常响应**将 `200` 作为整包候选处理。只有在下载预算内才能从同一响应重新解析头、索引和正文，原有片段一并丢弃。遇到 `416` 时停止当前文件的范围读取，提示重新打开或重新取得文件地址。服务端和 CDN 应对 `.cstr` 使用原始字节，关闭内容编码转换。浏览器跨域读取时需暴露 `Content-Range` 和 `ETag`，可变 URL 模式还需允许 `If-Range` 请求头。 [RFC 9110 Range 请求](https://www.rfc-editor.org/rfc/rfc9110.html#name-range-requests)
-- **滚动预读**先显示视口内的块，沿阅读方向预读接下来的 2 块，初始网络并发上限取 4。跳页后取消或丢弃过期请求。解码缓存按内存预算逐出，RGBA 像素占用可用 `width × height × 4` 估算。可见块合计超出缓存预算时，可以降低显示分辨率，并提示暂缓显示的块。
+## Page table
 
-## 3. 实施顺序与验收
+The page table starts at `index_offset` and contains one 16-byte record per page in reading order.
 
-1. **打包器。** 用 Python + Pillow 生成 WebP。散图、清单和 CBZ 都按路径逐级自然排序，数字段按数值排序。普通漫画页默认整页一块，长页支持按配置的像素高度切段。编码完成后记录实际字节长度和块高，写出头、索引、元数据和 Payload。样包应覆盖普通页、长页、末块较短和无元数据四种情况。
-2. **独立阅读器。** 建议用 TypeScript 实现索引解析，让本地文件与 HTTP 各自提供同一个按字节读取接口。先跑通指定页、指定块和解码显示，再接入视口定位和跳页。用独立实现读取打包器输出，逐块比对索引、字节和像素尺寸。
-3. **验证流式行为。** 记录首块开始解码前的请求数、显示首块前的下载字节数、跳页后取得的块号和解码缓存峰值。用小样包验证首块能随首段一起返回，用跨 64 KiB 的索引和首块分别验证补拉。覆盖截断、非法偏移、块高度不符、`206` 区间错误、`200` 回退、`416` 和版本切换。对普通漫画与长条漫分别跑冷打开和快速跳页，确认等待期间可以按索引保持布局，后台请求受预算约束。用同一长页比较整页和切段的包体积、首块下载量及接缝显示，再定默认切段高度。
+| Record offset | Type | Field | Meaning |
+| ---: | --- | --- | --- |
+| 0 | `u32` | `width` | Page width in pixels, positive |
+| 4 | `u32` | `height` | Page height in pixels, positive |
+| 8 | `u32` | `first_chunk` | Index of the first chunk in the chunk table |
+| 12 | `u32` | `chunk_count` | Number of chunks on the page, positive |
 
-## 4. 字节样包
+The first page starts at chunk zero. Each subsequent page starts immediately after the previous page's chunks. The final page's range ends at the total chunk count in the header.
 
-下面的完整文件共 250 字节。两页分别为 `2 × 4` 和 `2 × 2` 像素。三个 `2 × 2` WebP 块依次为红、绿、蓝。前两块组成第一页，第三块组成第二页。索引为 92 字节，元数据 `{"title":"样包"}` 为 18 字节，`payload_start = 142`。将十六进制行拼接并解码即可得到 `.cstr` 文件。
+## Chunk table and image data
+
+The chunk table starts at `index_offset + 16 × page_count` and contains one 20-byte record per chunk. Chunks follow page order and run from top to bottom within each page.
+
+| Record offset | Type | Field | Meaning |
+| ---: | --- | --- | --- |
+| 0 | `u32` | `height` | Chunk height in pixels, positive |
+| 4 | `u8` | `codec` | `1` WebP, `2` AVIF, `3` PNG |
+| 5 | `u8[3]` | `reserved` | All zero |
+| 8 | `u64` | `offset` | Byte offset relative to `body_start` |
+| 16 | `u32` | `size` | Encoded byte length, positive |
+
+Each chunk is a complete single-frame image, as wide as its page and as tall as the record specifies. The sum of chunk heights must equal the page height. A chunk's vertical origin is the sum of the preceding chunk heights on its page. Preserve shared boundaries when scaling adjacent chunks. Apply the source image's orientation before encoding.
+
+WebP is required for readers and is the format written by ComicStream. Readers may support AVIF and PNG. Report an assigned codec a reader cannot decode at the chunk level so other chunks remain readable. Codec values outside the table are invalid.
+
+```text
+chunk_start = body_start + chunk.offset
+chunk_end   = chunk_start + chunk.size
+body_end    = body_start + last_chunk.offset + last_chunk.size
+```
+
+The first chunk has offset zero. Each following chunk starts at the previous chunk's end. If thumbnails are absent, `body_end` is the file length.
+
+## Optional thumbnail table and data
+
+When flag bit 0 is set, a 16-byte record for each page follows the chunk table. The thumbnail images start at `body_end` and follow the same order as the page table.
+
+| Record offset | Type | Field | Meaning |
+| ---: | --- | --- | --- |
+| 0 | `u16` | `width` | Thumbnail width in pixels, 1–512 |
+| 2 | `u16` | `height` | Thumbnail height in pixels, 1–512 |
+| 4 | `u32` | `size` | Encoded byte length, 1–262,144 |
+| 8 | `u64` | `offset` | Byte offset relative to the thumbnail data start |
+
+```text
+thumbnail_table = index_offset + 16 × page_count + 20 × chunk_count
+thumbnail_start = body_end
+image_start     = thumbnail_start + thumbnail.offset
+image_end       = image_start + thumbnail.size
+file_size       = thumbnail_start + last_thumbnail.offset + last_thumbnail.size
+```
+
+Each thumbnail is a complete single-frame WebP. The dimensions in the record must match the image. The first thumbnail has offset zero. Each following thumbnail starts at the previous thumbnail's end. The final thumbnail ends at the end of the file. The format allows neither padding between images nor trailing bytes.
+
+## JSON metadata
+
+If `meta_size` is positive, the section at `meta_start` contains a UTF-8 JSON object without a byte order mark. Readers may display `title` and may use `readingDirection` to configure navigation. Defined direction values are `ltr` (left to right), `rtl` (right to left), and `ttb` (top to bottom). ComicStream defaults to `ltr` when the field is absent or unrecognized. Ignore unknown keys. The binary tables define page order, dimensions, codecs, and offsets.
+
+## Validation and recovery
+
+1. Read the file length and header. Validate the magic, version, flags, counts, and index bounds before reading the tables. Use integers that can represent unsigned 64-bit offsets, such as `BigInt` in JavaScript.
+2. Validate page and chunk ranges, chunk heights, image offsets, and the expected file length. Validate the thumbnail table and tail when the thumbnail flag is set. Check metadata independently so a bad JSON object can be reported without blocking body images.
+3. Before decoding, check the image header dimensions and enforce the decoder's memory budget. Verify the decoded dimensions against the index. Report corrupt image data at the affected chunk or thumbnail.
+
+ComicStream limits the index to 8 MiB and JSON metadata to 256 KiB. Its TypeScript `readComic` function validates the thumbnail table and tail by default. The browser enables `tolerateInvalidThumbnails` so a bad thumbnail table or tail can disable previews while the validated body remains available. The function returns `thumbnailError` and an empty thumbnail list in that case.
+
+`readThumbnail(page, signal)` returns the complete WebP bytes for one zero-based page. `readThumbnails(first, end, signal)` uses a half-open page interval and returns one byte array per image. Omitting the interval reads the entire thumbnail section, subject to a 32 MiB batch limit.
+
+## HTTP Range reads
+
+ComicStream first requests `Range: bytes=0-65535` and reuses the returned prefix. It requests any missing index bytes, then fetches body chunks or thumbnails as needed.
+
+- Convert `[start, end)` to an inclusive HTTP Range with `Range: bytes=start-(end-1)`. Validate the response's `Content-Range` bounds, total length, and body length. Adjacent images can share one request.
+- For mutable URLs, require a strong ETag before issuing later requests and send it in `If-Range`. Confirm that subsequent partial responses still refer to the same resource.
+- Treat a `200` as a candidate complete file within the download budget. Discard previous partial bytes before parsing it. A `416` invalidates the current byte-range session.
+- Serve the original bytes without a content encoding transformation. For cross-origin access, expose `Content-Range` and `ETag` and allow `If-Range` for mutable URLs. [HTTP Range semantics](https://www.rfc-editor.org/rfc/rfc9110.html#name-range-requests)
+
+## Reference file
+
+This 250-byte file contains two pages measuring `2 × 4` and `2 × 2` pixels. It has three `2 × 2` WebP chunks, in red, green, and blue. The first two chunks form page 0. The index is 92 bytes, the JSON metadata is 18 bytes, and the body starts at byte 142. Join the lines and decode the hexadecimal text to recover the complete file.
 
 ```hex
 4353545201000000020000000300000020000000000000005c00000012000000
@@ -105,10 +130,10 @@ file_size     = payload_start + 最后一块的 offset + 最后一块的 size
 524946461c000000574542505650384c0f0000002f014000000710d1fffe0722a2ff0100
 ```
 
-| 块号 | 页号 | 页内像素 `y` | 文件字节区间 | HTTP 请求头 |
+| Chunk | Page | Page-relative y range | File byte range | HTTP request header |
 | ---: | ---: | --- | --- | --- |
 | 0 | 0 | `[0, 2)` | `[142, 178)` | `Range: bytes=142-177` |
 | 1 | 0 | `[2, 4)` | `[178, 214)` | `Range: bytes=178-213` |
 | 2 | 1 | `[0, 2)` | `[214, 250)` | `Range: bytes=214-249` |
 
-连续读取第 0、1 块可以发出 `Range: bytes=142-213`。预期响应头为 `Content-Range: bytes 142-213/250`，72 字节正文按每块 36 字节切分。
+Request `Range: bytes=142-213` to read chunks 0 and 1 together. The response has `Content-Range: bytes 142-213/250` and a 72-byte body that splits into two 36-byte chunks. [Run the format tests](README.md#verify)

@@ -18,6 +18,59 @@ COMIC = BASE + "/library/order-fixture.cstr"
 CHROME = os.getenv("CSTR_CHROME")
 
 
+def verify_previews(browser):
+    url = BASE + "/library/preview-fixture.cstr"
+    file = ROOT / "library" / "preview-fixture.cstr"
+    data = file.read_bytes()
+    last_size, last_offset = struct.unpack_from("<IQ", data, 32 + 8 * (16 + 20 + 16) - 12)
+    preview_start = len(data) - last_size - last_offset
+    sixth_size, sixth_offset = struct.unpack_from("<IQ", data, 32 + 8 * (16 + 20) + 5 * 16 + 4)
+    second_group = preview_start + sixth_size + sixth_offset
+    for width, height in ((1280, 900), (390, 844)):
+        screen = browser.new_page(viewport={"width": width, "height": height})
+        ranges = []
+        screen.on("request", lambda request: ranges.append(request.headers["range"]) if request.url == url else None)
+        screen.goto(BASE)
+        screen.get_by_label("漫画包链接").fill(url)
+        screen.get_by_role("button", name="打开链接").click()
+        expect(screen.locator("#page-controls")).to_have_attribute("dir", "rtl")
+        expect(screen.locator("[data-chunk='0'] canvas")).to_be_visible()
+        assert all(int(header.split("=")[1].split("-")[1]) < preview_start for header in ranges)
+        screen.locator("#viewport").press("ArrowLeft")
+        expect(screen.locator("#page")).to_have_value("2")
+        screen.get_by_role("button", name="页面预览").click()
+        expect(screen.locator("#preview-list canvas")).to_have_count(6)
+        assert f"bytes={preview_start}-{second_group - 1}" in ranges
+        expect(screen.locator("[data-preview-page='1']")).to_have_attribute("aria-current", "page")
+        assert screen.locator("#previews").evaluate("(panel) => panel.scrollWidth === panel.clientWidth")
+        screen.screenshot(path=ROOT / ".cache" / "test" / f"previews-{width}.png")
+        screen.get_by_role("button", name="后一组").click()
+        expect(screen.locator("#preview-list canvas")).to_have_count(2)
+        assert f"bytes={second_group}-{len(data) - 1}" in ranges
+        screen.locator("[data-preview-page='7']").click()
+        expect(screen.locator("#previews")).to_be_hidden()
+        expect(screen.locator("#page")).to_have_value("8")
+        expect(screen.locator("#viewport")).to_be_focused()
+        screen.close()
+
+    damaged = bytearray(data)
+    page_count, chunk_count = struct.unpack_from("<II", damaged, 8)
+    struct.pack_into("<H", damaged, 32 + page_count * 16 + chunk_count * 20, 0)
+    screen = browser.new_page()
+    screen.goto(BASE)
+    screen.locator("#file").set_input_files({
+        "name": "damaged-preview.cstr", "mimeType": "application/octet-stream", "buffer": bytes(damaged),
+    })
+    expect(screen.locator("[data-chunk='0'] canvas")).to_be_visible()
+    expect(screen.locator("#notice")).to_contain_text("已关闭页面预览")
+    expect(screen.locator("#preview-toggle")).to_be_hidden()
+    expect(screen.locator("#page-controls")).to_have_attribute("dir", "rtl")
+    screen.get_by_role("button", name="下一页").click()
+    expect(screen.locator("#page")).to_have_value("2")
+    expect(screen.locator("[data-chunk='1'] canvas")).to_be_visible()
+    screen.close()
+
+
 def verify_reader_limits(browser, folder):
     cli = [sys.executable, str(ROOT / "pack.py")]
     big = folder / "large.png"
@@ -158,8 +211,9 @@ with sync_playwright() as playwright:
         expect(mobile.get_by_role("spinbutton")).to_have_value("2")
         expect(mobile.locator("[data-chunk='3'] canvas")).to_be_visible(timeout=15000)
         mobile.screenshot(path=ROOT / ".cache" / "test" / "mobile-reader.png")
+        verify_previews(browser)
         with TemporaryDirectory() as temporary:
             verify_reader_limits(browser, Path(temporary))
     finally:
         browser.close()
-print("PASS: Chromium Range playback, out-of-order blocks, jump, mobile navigation, large pages and metadata recovery.")
+print("PASS: Chromium Range playback, previews, RTL navigation, out-of-order blocks, jump, large pages and metadata recovery.")

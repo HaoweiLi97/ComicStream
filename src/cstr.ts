@@ -1,6 +1,8 @@
 const HEADER = 32;
 const PAGE = 16;
 const CHUNK = 20;
+const THUMBNAIL = 16;
+const FLAG_THUMBNAILS = 1;
 const U64_MAX = (1n << 64n) - 1n;
 export const LIMITS = {
   index: 8 * 1024 * 1024,
@@ -9,6 +11,8 @@ export const LIMITS = {
   whole: 64 * 1024 * 1024,
   decoded: 128 * 1024 * 1024,
   prefix: 64 * 1024,
+  thumbnail: 256 * 1024,
+  thumbnailDimension: 512,
 };
 
 export class FormatError extends Error {}
@@ -183,22 +187,61 @@ export interface Chunk {
   size: number;
 }
 
+export interface Thumbnail {
+  width: number;
+  height: number;
+  start: bigint;
+  size: number;
+}
+
+export type ReadingDirection = "ltr" | "rtl" | "ttb";
+
+export function readingDirection(value: unknown): ReadingDirection | undefined {
+  return value === "ltr" || value === "rtl" || value === "ttb" ? value : undefined;
+}
+
 const viewOf = (bytes: Uint8Array) => new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
 
-export async function readComic(source: ByteSource, signal?: AbortSignal) {
+function readThumbnailIndex(index: DataView, table: number, count: number, start: bigint, fileSize: bigint) {
+  const thumbnails: Thumbnail[] = [];
+  let position = start;
+  for (let page = 0; page < count; page++) {
+    const entry = table + page * THUMBNAIL;
+    const width = index.getUint16(entry, true);
+    const height = index.getUint16(entry + 2, true);
+    const size = index.getUint32(entry + 4, true);
+    if (!width || !height || width > LIMITS.thumbnailDimension || height > LIMITS.thumbnailDimension
+        || !size || size > LIMITS.thumbnail || index.getBigUint64(entry + 8, true) !== position - start) {
+      throw new FormatError("缩略图尺寸或偏移无效");
+    }
+    thumbnails.push({ width, height, start: position, size });
+    position += BigInt(size);
+    if (position > fileSize || position > U64_MAX) throw new FormatError("缩略图超出文件范围");
+  }
+  if (position !== fileSize) throw new FormatError("缩略图区长度与文件总长不匹配");
+  return thumbnails;
+}
+
+export async function readComic(
+  source: ByteSource, signal?: AbortSignal, { tolerateInvalidThumbnails = false } = {},
+) {
   if (source.size < BigInt(HEADER)) throw new FormatError("漫画包文件头不完整");
   const bytes = await source.read(0n, BigInt(HEADER), signal);
   const header = viewOf(bytes);
   if (header.getUint32(0) !== 0x43535452) throw new FormatError("文件不是 CSTR 漫画包");
-  if (header.getUint16(4, true) !== 1 || header.getUint16(6, true) !== 0) {
+  const version = header.getUint16(4, true);
+  const flags = header.getUint16(6, true);
+  if (version !== 1 || (flags & ~FLAG_THUMBNAILS) !== 0) {
     throw new FormatError("不支持此 CSTR 版本或标志位");
   }
   const pageCount = header.getUint32(8, true);
   const chunkCount = header.getUint32(12, true);
   const indexLength = header.getUint32(24, true);
   const metaLength = header.getUint32(28, true);
+  const thumbnailTable = pageCount * PAGE + chunkCount * CHUNK;
+  const hasThumbnails = (flags & FLAG_THUMBNAILS) !== 0;
   if (!pageCount || chunkCount < pageCount || header.getBigUint64(16, true) !== BigInt(HEADER)
-      || indexLength !== pageCount * PAGE + chunkCount * CHUNK) {
+      || indexLength !== thumbnailTable + (hasThumbnails ? pageCount * THUMBNAIL : 0)) {
     throw new FormatError("索引长度或记录数量无效");
   }
   if (indexLength > LIMITS.index) throw new FormatError("索引超过阅读器的读取上限");
@@ -238,11 +281,40 @@ export async function readComic(source: ByteSource, signal?: AbortSignal) {
     }
     if (y !== height) throw new FormatError("块高之和与页高不符");
   }
-  if (chunks.length !== chunkCount || position !== source.size) {
+  if (chunks.length !== chunkCount || (!hasThumbnails && position !== source.size)) {
     throw new FormatError("索引未覆盖全部块，或文件长度不匹配");
   }
+  let thumbnails: Thumbnail[] = [];
+  let thumbnailError: FormatError | undefined;
+  if (hasThumbnails) {
+    try {
+      thumbnails = readThumbnailIndex(index, thumbnailTable, pageCount, position, source.size);
+    } catch (error) {
+      if (!tolerateInvalidThumbnails || !(error instanceof FormatError)) throw error;
+      thumbnailError = error;
+    }
+  }
+  async function readThumbnails(first = 0, end = thumbnails.length, previewSignal?: AbortSignal) {
+    if (!Number.isInteger(first) || !Number.isInteger(end) || first < 0 || end < first
+        || end > thumbnails.length) throw new FormatError("缩略图页码超出范围");
+    if (first === end) return [];
+    const start = thumbnails[first].start;
+    const last = thumbnails[end - 1];
+    const through = last.start + BigInt(last.size);
+    if (through - start > BigInt(LIMITS.chunk)) throw new FormatError("缩略图批次超过读取上限，请分批读取");
+    const bytes = await source.read(start, through, previewSignal);
+    return thumbnails.slice(first, end).map(thumbnail => {
+      const offset = Number(thumbnail.start - start);
+      return bytes.subarray(offset, offset + thumbnail.size);
+    });
+  }
+
   return {
-    pages, chunks, source,
+    pages, chunks, thumbnails, thumbnailError, source, readThumbnails,
+    async readThumbnail(page: number, previewSignal?: AbortSignal) {
+      const [image] = await readThumbnails(page, page + 1, previewSignal);
+      return image;
+    },
     async metadata(metadataSignal?: AbortSignal): Promise<Record<string, unknown> | undefined> {
       if (metaLength === 0) return undefined;
       if (metaLength > LIMITS.metadata) throw new FormatError("元数据超过读取上限");

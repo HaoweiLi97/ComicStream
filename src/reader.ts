@@ -1,5 +1,5 @@
-import { fileSource, FileReplaced, FormatError, LIMITS, openHttp, RangeErrorResponse, RangeSessionError, readComic } from "./cstr.js";
-import type { ByteSource, Comic } from "./cstr.js";
+import { fileSource, FileReplaced, FormatError, LIMITS, openHttp, RangeErrorResponse, RangeSessionError, readComic, readingDirection } from "./cstr.js";
+import type { ByteSource, Comic, ReadingDirection } from "./cstr.js";
 import { bitmapCost, decodeWebP } from "./webp.js";
 
 const find = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
@@ -7,6 +7,13 @@ const opening = find("opening");
 const viewport = find("viewport");
 const pages = find("pages");
 const navigation = find("navigation");
+const pageControls = find("page-controls");
+const previews = find("previews");
+const previewList = find("preview-list");
+const previewPrevious = find<HTMLButtonElement>("preview-previous");
+const previewNext = find<HTMLButtonElement>("preview-next");
+const previewRange = find("preview-range");
+const previewToggle = find<HTMLButtonElement>("preview-toggle");
 const bookTitle = find("book-title");
 const change = find<HTMLButtonElement>("change");
 const previous = find<HTMLButtonElement>("previous");
@@ -23,6 +30,7 @@ const message = (error: unknown) => error instanceof Error ? error.message : "�
 const GROUP_BYTES = 2 * 1024 * 1024;
 const CONCURRENCY = 4;
 const MAX_BITMAP_WIDTH = 1920;
+const PREVIEW_GROUP = 6;
 
 interface BlockRender {
   id: number;
@@ -51,6 +59,9 @@ class Reader {
   private direction = 1;
   private scroll = 0;
   private page = 0;
+  private readingDirection: ReadingDirection = "ltr";
+  private previewRequest?: AbortController;
+  private previewStart = 0;
 
   constructor(private readonly comic: Comic, private readonly name: string) {
     const fragment = document.createDocumentFragment();
@@ -72,6 +83,8 @@ class Reader {
     pages.replaceChildren(fragment);
     pageInput.max = String(comic.pages.length);
     total.textContent = "共 " + comic.pages.length + " 页";
+    previewToggle.hidden = comic.thumbnails.length === 0;
+    this.setReadingDirection("ltr");
     viewport.addEventListener("scroll", this.queue, { passive: true });
     this.observer.observe(viewport);
     this.showPage(0);
@@ -85,7 +98,9 @@ class Reader {
   private async readMetadata() {
     try {
       const info = await this.comic.metadata(this.meta.signal);
-      if (!this.disposed && !this.stopped && typeof info?.title === "string" && info.title.trim()) {
+      if (this.disposed || this.stopped) return;
+      this.setReadingDirection(readingDirection(info?.readingDirection) ?? "ltr");
+      if (typeof info?.title === "string" && info.title.trim()) {
         bookTitle.textContent = info.title;
       }
     } catch (error) {
@@ -98,6 +113,7 @@ class Reader {
   dispose() {
     this.disposed = true;
     this.meta.abort();
+    this.closePreviews();
     this.observer.disconnect();
     viewport.removeEventListener("scroll", this.queue);
     cancelAnimationFrame(this.frame);
@@ -120,8 +136,116 @@ class Reader {
     this.jump(this.page + delta);
   }
 
+  stepHorizontally(delta: number) {
+    this.step(this.readingDirection === "rtl" ? -delta : delta);
+  }
+
+  private setReadingDirection(direction: ReadingDirection) {
+    this.readingDirection = direction;
+    pageControls.dataset.direction = direction;
+    pageControls.dir = previewList.dir = direction === "rtl" ? "rtl" : "ltr";
+  }
+
+  togglePreviews() {
+    if (!previews.hidden) {
+      this.closePreviews();
+      return;
+    }
+    if (this.stopped || !this.comic.thumbnails.length) return;
+    previews.hidden = false;
+    previewToggle.setAttribute("aria-expanded", "true");
+    this.showPreviews(this.page - this.page % PREVIEW_GROUP, this.page);
+  }
+
+  shiftPreviews(delta: number) {
+    this.showPreviews(this.previewStart + delta * PREVIEW_GROUP);
+  }
+
+  private closePreviews() {
+    this.previewRequest?.abort();
+    this.previewRequest = undefined;
+    previews.hidden = true;
+    previewToggle.setAttribute("aria-expanded", "false");
+    previewList.replaceChildren();
+  }
+
+  private showPreviews(start: number, focus = start) {
+    const count = this.comic.thumbnails.length;
+    if (previews.hidden || start < 0 || start >= count) return;
+    this.previewRequest?.abort();
+    const request = new AbortController();
+    this.previewRequest = request;
+    this.previewStart = start;
+    const end = Math.min(start + PREVIEW_GROUP, count);
+    previewRange.textContent = start + 1 + "–" + end + " / " + count;
+    const frames: HTMLSpanElement[] = [];
+    const buttons: HTMLButtonElement[] = [];
+    for (let page = start; page < end; page++) {
+      const button = document.createElement("button");
+      const frame = document.createElement("span");
+      const label = "第 " + (page + 1) + " 页";
+      button.type = "button";
+      button.dataset.previewPage = String(page);
+      button.setAttribute("aria-label", label);
+      frame.className = "preview-image";
+      frame.textContent = "加载中…";
+      frame.setAttribute("aria-hidden", "true");
+      button.append(frame, label);
+      button.onclick = () => {
+        this.closePreviews();
+        this.jump(page);
+        viewport.focus({ preventScroll: true });
+      };
+      frames.push(frame);
+      buttons.push(button);
+    }
+    previewList.replaceChildren(...buttons);
+    this.markPreview();
+    previewPrevious.disabled = start === 0;
+    previewNext.disabled = end === count;
+    buttons[focus - start].focus({ preventScroll: true });
+    void this.loadPreviews(start, end, frames, request.signal);
+  }
+
+  private async loadPreviews(start: number, end: number, frames: HTMLSpanElement[], signal: AbortSignal) {
+    try {
+      const images = await this.comic.readThumbnails(start, end, signal);
+      for (const [index, bytes] of images.entries()) {
+        signal.throwIfAborted();
+        const frame = frames[index];
+        const { width, height } = this.comic.thumbnails[start + index];
+        try {
+          const bitmap = await decodeWebP(bytes, width, height);
+          try {
+            signal.throwIfAborted();
+            const canvas = document.createElement("canvas");
+            canvas.width = width;
+            canvas.height = height;
+            canvas.getContext("2d")!.drawImage(bitmap, 0, 0);
+            frame.replaceChildren(canvas);
+          } finally {
+            bitmap.close();
+          }
+        } catch {
+          if (!signal.aborted) frame.textContent = "预览不可用";
+        }
+      }
+    } catch (error) {
+      if (signal.aborted) return;
+      if (error instanceof RangeSessionError) this.transportError(error);
+      else for (const frame of frames) frame.textContent = "预览不可用";
+    }
+  }
+
+  private markPreview() {
+    previewList.querySelector('[aria-current="page"]')?.removeAttribute("aria-current");
+    previewList.querySelector(`[data-preview-page="${this.page}"]`)?.setAttribute("aria-current", "page");
+  }
+
   private showPage(page: number) {
+    const changed = this.page !== page;
     this.page = page;
+    if (changed && !previews.hidden) this.markPreview();
     if (document.activeElement !== pageInput) pageInput.value = String(page + 1);
     previous.disabled = page === 0;
     next.disabled = page === this.comic.pages.length - 1;
@@ -333,6 +457,8 @@ class Reader {
     if (this.disposed || this.stopped) return;
     this.stopped = true;
     this.meta.abort();
+    this.closePreviews();
+    previewToggle.hidden = true;
     for (const job of this.jobs) job.controller.abort();
     if (error instanceof FileReplaced) {
       void open(async () => error.source, this.name, "地址返回了更新后的完整漫画包");
@@ -366,15 +492,16 @@ async function open(source: (signal: AbortSignal) => Promise<ByteSource>, name: 
   change.hidden = false;
   openStatus.textContent = "正在读取漫画索引…";
   try {
-    const comic = await readComic(await source(request.signal), request.signal);
+    const comic = await readComic(await source(request.signal), request.signal, { tolerateInvalidThumbnails: true });
     request.signal.throwIfAborted();
     opening.hidden = true;
     viewport.hidden = navigation.hidden = bookTitle.hidden = false;
     bookTitle.textContent = name;
     viewport.scrollTop = 0;
     active = new Reader(comic, name);
-    if (update) {
-      notice.textContent = update;
+    const warnings = [update, comic.thumbnailError && "缩略图索引或数据区损坏，已关闭页面预览"].filter(Boolean);
+    if (warnings.length) {
+      notice.textContent = warnings.join("。");
       notice.hidden = false;
     }
     viewport.focus({ preventScroll: true });
@@ -411,6 +538,15 @@ find<HTMLFormElement>("remote").onsubmit = event => {
 change.onclick = chooseSource;
 previous.onclick = () => active?.step(-1);
 next.onclick = () => active?.step(1);
+previewToggle.onclick = () => active?.togglePreviews();
+previewPrevious.onclick = () => active?.shiftPreviews(-1);
+previewNext.onclick = () => active?.shiftPreviews(1);
+previews.onkeydown = event => {
+  if (event.key === "Escape") {
+    active?.togglePreviews();
+    previewToggle.focus();
+  }
+};
 pageInput.onchange = () => active?.jump(pageInput.valueAsNumber - 1);
 pageInput.onblur = () => active?.syncPageInput();
 pageInput.onkeydown = event => {
@@ -422,6 +558,6 @@ pageInput.onkeydown = event => {
 viewport.onkeydown = event => {
   if (event.key === "ArrowLeft" || event.key === "ArrowRight") {
     event.preventDefault();
-    active?.step(event.key === "ArrowLeft" ? -1 : 1);
+    active?.stepHorizontally(event.key === "ArrowLeft" ? -1 : 1);
   }
 };

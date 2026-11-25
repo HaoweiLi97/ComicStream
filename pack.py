@@ -1,9 +1,11 @@
-"""Pack naturally sorted manga pages into a CSTR v1 file."""
+"""Pack naturally sorted manga pages into a CSTR file."""
 
 import argparse
 from contextlib import nullcontext
+from fractions import Fraction
 from io import BytesIO
 import json
+from math import ceil
 from pathlib import Path, PurePosixPath
 import re
 from shutil import copyfileobj
@@ -17,8 +19,14 @@ from PIL import Image, ImageOps
 HEADER = Struct("<4sHHIIQII")
 PAGE = Struct("<IIII")
 CHUNK = Struct("<IB3xQI")
+THUMBNAIL = Struct("<HHIQ")
+FLAG_THUMBNAILS = 1
+READING_DIRECTIONS = ("ltr", "rtl", "ttb")
+THUMBNAIL_BYTES = 256 * 1024
 U32_MAX = (1 << 32) - 1
 WEBP_MAX_DIMENSION = 16383
+READER_INDEX_BYTES = 8 * 1024 * 1024
+READER_METADATA_BYTES = 256 * 1024
 READER_CHUNK_BYTES = 32 * 1024 * 1024
 READER_DECODED_BYTES = 128 * 1024 * 1024
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".avif", ".gif", ".bmp", ".tif", ".tiff"}
@@ -46,10 +54,31 @@ def archive_pages(archive):
     return [entry for entry, _ in candidates]
 
 
+def write_thumbnail(image, destination, table):
+    width, height = image.size
+    # Keep normal pages whole. Crop extreme aspect ratios before resizing.
+    width, height = min(width, height * 2), min(height, width * 2)
+    scale = min(1, max(Fraction(160, width), Fraction(224, height)))
+    size = (ceil(width * scale), ceil(height * scale))
+    left = (image.width - width) // 2
+    with image.resize(size, Image.Resampling.LANCZOS, box=(left, 0, left + width, height)) as thumb:
+        with BytesIO() as buffer:
+            thumb.save(buffer, "WEBP", quality=72)
+            with buffer.getbuffer() as data:
+                if not 0 < len(data) <= THUMBNAIL_BYTES:
+                    raise ValueError("Page thumbnail exceeds its size limit")
+                table.extend(THUMBNAIL.pack(*size, len(data), destination.tell()))
+                destination.write(data)
+
+
 def pack(output, inputs, *, strip_height=0, quality=85, lossless=False, metadata=None,
-         archive=None):
-    if not inputs or len(inputs) > U32_MAX // (PAGE.size + CHUNK.size):
-        raise ValueError("A representable, nonempty list of pages is required")
+         archive=None, thumbnails=False, reading_direction=None):
+    page_record_size = PAGE.size + (THUMBNAIL.size if thumbnails else 0)
+    if not inputs:
+        raise ValueError("A nonempty list of pages is required")
+    max_chunks = (READER_INDEX_BYTES - page_record_size * len(inputs)) // CHUNK.size
+    if len(inputs) > max_chunks:
+        raise ValueError(f"Index exceeds ComicStream's reading limit ({READER_INDEX_BYTES} bytes)")
     if not 0 <= strip_height <= WEBP_MAX_DIMENSION or not 0 <= quality <= 100:
         raise ValueError("Strip height must be 0–16383 and quality must be 0–100")
     inputs = sorted(inputs, key=natural_key if archive is None else lambda entry: natural_key(entry.filename))
@@ -59,17 +88,24 @@ def pack(output, inputs, *, strip_height=0, quality=85, lossless=False, metadata
         raise ValueError("The output path is also an input page")
     if metadata is not None and not isinstance(metadata, dict):
         raise ValueError("Metadata must be a JSON object")
+    if reading_direction is not None:
+        metadata = {**(metadata or {}), "readingDirection": reading_direction}
+    if metadata is not None and "readingDirection" in metadata:
+        if metadata["readingDirection"] not in READING_DIRECTIONS:
+            raise ValueError("Reading direction must be ltr, rtl or ttb")
     meta = b"" if metadata is None else json.dumps(
         metadata, ensure_ascii=False, allow_nan=False, separators=(",", ":")
     ).encode("utf-8")
-    if len(meta) > U32_MAX:
-        raise ValueError("Metadata exceeds the CSTR v1 size limit")
+    if len(meta) > READER_METADATA_BYTES:
+        raise ValueError(f"Metadata exceeds ComicStream's {READER_METADATA_BYTES // 1024} KiB reading limit")
 
     temporary_output = None
     try:
-        with TemporaryFile(dir=output.parent) as payload:
+        with (TemporaryFile(dir=output.parent) as payload,
+              (TemporaryFile(dir=output.parent) if thumbnails else nullcontext()) as previews):
             page_table = bytearray()
             chunk_table = bytearray()
+            thumbnail_table = bytearray()
             chunk_count = 0
             offset = 0
             for path in inputs:
@@ -85,13 +121,15 @@ def pack(output, inputs, *, strip_height=0, quality=85, lossless=False, metadata
                         width, height = image.size
                         if width > WEBP_MAX_DIMENSION or height > U32_MAX:
                             raise ValueError(f"Image dimensions are too large: {label}")
+                        if previews is not None:
+                            write_thumbnail(image, previews, thumbnail_table)
                         step = min(strip_height or height, WEBP_MAX_DIMENSION, READER_DECODED_BYTES // (4 * width))
                         first_chunk = chunk_count
                         y = 0
                         while y < height:
                             bottom = min(y + step, height)
-                            if PAGE.size * len(inputs) + CHUNK.size * (chunk_count + 1) > U32_MAX:
-                                raise ValueError("Index exceeds the CSTR v1 size limit")
+                            if chunk_count >= max_chunks:
+                                raise ValueError(f"Index exceeds ComicStream's reading limit ({READER_INDEX_BYTES} bytes)")
                             with image.crop((0, y, width, bottom)) as strip, BytesIO() as buffer:
                                 strip.save(buffer, "WEBP", quality=quality, lossless=lossless, method=4)
                                 with buffer.getbuffer() as data:
@@ -106,17 +144,23 @@ def pack(output, inputs, *, strip_height=0, quality=85, lossless=False, metadata
                             chunk_count += 1
                             y = bottom
                         page_table.extend(PAGE.pack(width, height, first_chunk, chunk_count - first_chunk))
-            if HEADER.size + len(page_table) + len(chunk_table) + len(meta) + offset > (1 << 64) - 1:
-                raise ValueError("File exceeds the CSTR v1 size limit")
+            index_size = len(page_table) + len(chunk_table) + len(thumbnail_table)
+            preview_size = previews.tell() if previews is not None else 0
+            if HEADER.size + index_size + len(meta) + offset + preview_size > (1 << 64) - 1:
+                raise ValueError("File exceeds the CSTR size limit")
             with NamedTemporaryFile(dir=output.parent, delete=False) as destination:
                 temporary_output = Path(destination.name)
-                destination.write(HEADER.pack(b"CSTR", 1, 0, len(inputs), chunk_count, HEADER.size,
-                                              len(page_table) + len(chunk_table), len(meta)))
+                destination.write(HEADER.pack(b"CSTR", 1, FLAG_THUMBNAILS if thumbnails else 0,
+                                              len(inputs), chunk_count, HEADER.size, index_size, len(meta)))
                 destination.write(page_table)
                 destination.write(chunk_table)
+                destination.write(thumbnail_table)
                 destination.write(meta)
                 payload.seek(0)
                 copyfileobj(payload, destination, length=1024 * 1024)
+                if previews is not None:
+                    previews.seek(0)
+                    copyfileobj(previews, destination, length=1024 * 1024)
         temporary_output.replace(output)
     finally:
         if temporary_output is not None:
@@ -132,6 +176,9 @@ def main():
     cli.add_argument("--quality", type=int, default=85)
     cli.add_argument("--lossless", action="store_true")
     cli.add_argument("--metadata", type=Path, help="Path to a UTF-8 JSON object")
+    cli.add_argument("--thumbnails", action="store_true", help="Embed optional page thumbnails in CSTR v1")
+    cli.add_argument("--reading-direction", choices=READING_DIRECTIONS,
+                     help="Set the readingDirection metadata field")
     cli.add_argument("--manifest", type=Path,
                      help="UTF-8 JSON array of image paths relative to the manifest")
     cli.add_argument("--cbz", type=Path, help="Read image pages directly from a CBZ archive")
@@ -165,7 +212,8 @@ def main():
                     print(f"{index}\t{page if archive is None else page.filename}")
                 return
             count = pack(args.output, inputs, strip_height=args.strip_height, quality=args.quality,
-                         lossless=args.lossless, metadata=metadata, archive=archive)
+                         lossless=args.lossless, metadata=metadata, archive=archive,
+                         thumbnails=args.thumbnails, reading_direction=args.reading_direction)
     except (OSError, ValueError, BadZipFile, RuntimeError,
             Image.DecompressionBombError, Image.DecompressionBombWarning) as error:
         cli.exit(1, f"cstr: {error}\n")

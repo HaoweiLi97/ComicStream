@@ -4,9 +4,12 @@ from io import BytesIO
 import json
 from pathlib import Path
 from random import Random
+from runpy import run_path
 from struct import unpack_from
 import subprocess
 import sys
+from unittest import TestCase
+from unittest.mock import patch
 from zipfile import ZipFile
 
 from PIL import Image
@@ -65,4 +68,54 @@ subprocess.run(cli + ["-o", str(whole), *scattered], check=True)
 header = whole.read_bytes()[:32]
 assert unpack_from("<III", header, 8) == (3, 3, 32)
 assert unpack_from("<I", header, 28) == (0,)
-print("PASS: CBZ, image arguments and manifest sort 1, 2, 10. Verified actual page pixels and short final strips.")
+
+previews = LIBRARY / "preview-fixture.cstr"
+small = CACHE / "small.png"
+portrait = CACHE / "portrait.png"
+with Image.new("RGB", (80, 120), "blue") as image:
+    image.save(small)
+with Image.new("RGB", (320, 480), "green") as image:
+    image.save(portrait)
+subprocess.run(cli + ["--thumbnails", "--reading-direction", "rtl", "--metadata", str(metadata),
+                     "-o", str(previews), *scattered, str(portrait), str(small), *scattered], check=True)
+data = previews.read_bytes()
+_, version, flags, page_count, chunk_count, table, index_size, meta_size = unpack_from("<4sHHIIQII", data)
+assert (version, flags, page_count, chunk_count) == (1, 1, 8, 8)
+chunk_table = table + page_count * 16
+thumbnail_table = chunk_table + chunk_count * 20
+metadata_start = table + index_size
+assert json.loads(data[metadata_start:metadata_start + meta_size]) == {
+    "title": "排序测试", "readingDirection": "rtl"
+}
+last_offset, last_size = unpack_from("<QI", data, thumbnail_table - 12)
+preview_start = metadata_start + meta_size + last_offset + last_size
+expected_offset = 0
+for page in range(page_count):
+    width, height, size, offset = unpack_from("<HHIQ", data, thumbnail_table + page * 16)
+    expected_size = ((160, 320) if page < 6 else (160, 240) if page == 6 else (80, 120))
+    assert (width, height) == expected_size
+    assert offset == expected_offset
+    with Image.open(BytesIO(data[preview_start + offset:preview_start + offset + size])) as image:
+        assert image.format == "WEBP" and image.size == expected_size
+        image.load()
+    expected_offset += size
+assert preview_start + expected_offset == len(data)
+
+pack = run_path(str(ROOT / "pack.py"))["pack"]
+boundary_output = CACHE / "reader-boundary.cstr"
+metadata_limit = 256 * 1024
+metadata_overhead = len(b'{"notes":"","readingDirection":"rtl"}')
+notes = "x" * (metadata_limit - metadata_overhead)
+with patch.dict(pack.__globals__, {"READER_INDEX_BYTES": 52}):
+    pack(boundary_output, [small], thumbnails=True, metadata={"notes": notes}, reading_direction="rtl")
+    boundary_data = boundary_output.read_bytes()
+    assert unpack_from("<II", boundary_data, 24) == (52, metadata_limit)
+    with TestCase().assertRaisesRegex(ValueError, "Metadata.*256 KiB"):
+        pack(boundary_output, [small], thumbnails=True, metadata={"notes": notes + "x"}, reading_direction="rtl")
+    with TestCase().assertRaisesRegex(ValueError, "Index.*reading"):
+        missing = CACHE / "missing-page.png"
+        pack(boundary_output, [missing, missing], thumbnails=True)
+    with TestCase().assertRaisesRegex(ValueError, "Index.*reading"):
+        pack(boundary_output, [small], thumbnails=True, strip_height=60)
+assert boundary_output.read_bytes() == boundary_data
+print("PASS: page order, strip pixels, metadata, v1 thumbnails, and packer read limits.")

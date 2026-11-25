@@ -38,11 +38,24 @@
     <div id="pages"></div>
   </main>
   <p id="notice" class="notice" role="status" hidden></p>
+  <section id="previews" aria-label="页面预览" hidden>
+    <div id="preview-list"></div>
+    <div class="preview-controls">
+      <button id="preview-previous" type="button">前一组</button>
+      <span id="preview-range" role="status"></span>
+      <button id="preview-next" type="button">后一组</button>
+    </div>
+  </section>
   <footer id="navigation" hidden>
-    <button id="previous" type="button">上一页</button>
-    <label class="page-number">第 <input type="number" min="1" id="page" aria-label="跳到第几页"> 页</label>
-    <span id="total"></span>
-    <button id="next" type="button">下一页</button>
+    <div id="page-controls">
+      <button id="previous" type="button"><span aria-hidden="true"></span>上一页</button>
+      <div class="page-count" dir="ltr">
+        <label class="page-number">第 <input type="number" min="1" id="page" aria-label="跳到第几页"> 页</label>
+        <span id="total"></span>
+      </div>
+      <button id="next" type="button">下一页<span aria-hidden="true"></span></button>
+    </div>
+    <button id="preview-toggle" type="button" aria-controls="previews" aria-expanded="false" hidden>页面预览</button>
   </footer>
 </body>
 </html>
