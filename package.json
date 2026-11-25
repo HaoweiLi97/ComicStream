@@ -1,6 +1,6 @@
 {
   "name": "comicstream",
-  "description": "CSTR is a random-access comic file format. ComicStream includes a CBZ converter and a browser reader that streams WebP chunks and page thumbnails over HTTP Range.",
+  "description": "CSTR is a comic file format optimized for streaming. ComicStream includes a CBZ converter and a browser reader that loads pages, webtoon strips, and thumbnails on demand over HTTP Range.",
   "keywords": [
     "cstr",
     "file-format",
@@ -11,6 +11,7 @@
     "webp",
     "http-range",
     "random-access",
+    "streaming",
     "page-thumbnails"
   ],
   "private": true,

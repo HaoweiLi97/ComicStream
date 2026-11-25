@@ -2,7 +2,7 @@
 
 English · [简体中文](README.zh-CN.md)
 
-CSTR (`.cstr`) is a random-access comic file format. Its binary index lets a reader fetch a page, a visible segment of a long webtoon, or a complete page thumbnail by byte range. ComicStream includes a Python packer and a browser reader.
+CSTR (`.cstr`) is a comic file format optimized for streaming. Its binary index lets a reader load a page, a visible segment of a long webtoon, or a complete page thumbnail on demand over HTTP Range. ComicStream includes a Python packer and a browser reader.
 
 ## CSTR file layout
 
