@@ -52,14 +52,14 @@ The chunk table starts at `index_offset + 16 × page_count` and contains one 20-
 | Record offset | Type | Field | Meaning |
 | ---: | --- | --- | --- |
 | 0 | `u32` | `height` | Chunk height in pixels, positive |
-| 4 | `u8` | `codec` | `1` WebP, `2` AVIF, `3` PNG |
+| 4 | `u8` | `codec` | `1` WebP, `2` AVIF, `3` PNG, `4` JPEG |
 | 5 | `u8[3]` | `reserved` | All zero |
 | 8 | `u64` | `offset` | Byte offset relative to `body_start` |
 | 16 | `u32` | `size` | Encoded byte length, positive |
 
-Each chunk is a complete single-frame image, as wide as its page and as tall as the record specifies. The sum of chunk heights must equal the page height. A chunk's vertical origin is the sum of the preceding chunk heights on its page. Preserve shared boundaries when scaling adjacent chunks. Apply the source image's orientation before encoding.
+Each chunk is a complete single-frame image, as wide as its page and as tall as the record specifies. The sum of chunk heights must equal the page height. A chunk's vertical origin is the sum of the preceding chunk heights on its page. Preserve shared boundaries when scaling adjacent chunks. Apply the source image's orientation before encoding replacement chunks. An image that already meets the chunk requirements can be stored byte for byte.
 
-WebP is required for readers and is the format written by ComicStream. Readers may support AVIF and PNG. Report an assigned codec a reader cannot decode at the chunk level so other chunks remain readable. Codec values outside the table are invalid.
+WebP is required for readers. AVIF, PNG, and JPEG are optional codecs. ComicStream's browser reader supports all four through the browser's image decoders. Report an assigned codec a reader cannot decode at the chunk level so other chunks remain readable. Codec values outside the table are invalid.
 
 ```text
 chunk_start = body_start + chunk.offset

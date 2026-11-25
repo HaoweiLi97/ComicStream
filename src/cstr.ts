@@ -3,6 +3,7 @@ const PAGE = 16;
 const CHUNK = 20;
 const THUMBNAIL = 16;
 const FLAG_THUMBNAILS = 1;
+export const CODEC = { webp: 1, avif: 2, png: 3, jpeg: 4 } as const;
 const U64_MAX = (1n << 64n) - 1n;
 export const LIMITS = {
   index: 8 * 1024 * 1024,
@@ -268,7 +269,7 @@ export async function readComic(
       const chunkHeight = index.getUint32(offset, true);
       const codec = index.getUint8(offset + 4);
       const size = index.getUint32(offset + 16, true);
-      if (!chunkHeight || !size || codec < 1 || codec > 3 || index.getUint32(offset + 4, true) !== codec
+      if (!chunkHeight || !size || codec < CODEC.webp || codec > CODEC.jpeg || index.getUint32(offset + 4, true) !== codec
           || index.getBigUint64(offset + 8, true) !== position - payloadStart) {
         throw new FormatError("块尺寸、编码或偏移无效");
       }

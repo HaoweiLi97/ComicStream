@@ -71,6 +71,36 @@ def verify_previews(browser):
     screen.close()
 
 
+def verify_original_codecs(browser):
+    url = BASE + "/library/mixed-formats.cstr"
+    screen = browser.new_page(viewport={"width": 1280, "height": 900})
+    ranges = []
+    screen.on("request", lambda request: ranges.append(request.headers["range"]) if request.url == url else None)
+    screen.goto(BASE)
+    screen.get_by_label("漫画包链接").fill(url)
+    screen.get_by_role("button", name="打开链接").click()
+    page_number = screen.locator("#page")
+    for index, (width, color) in enumerate((
+        (1920, (200, 30, 40)), (180, (30, 180, 40)), (180, (40, 50, 200)), (180, (220, 160, 30)),
+    )):
+        page_number.fill(str(index + 1))
+        page_number.press("Enter")
+        canvas = screen.locator(f"[data-chunk='{index}'] canvas")
+        expect(canvas).to_be_visible()
+        expect(canvas).to_have_attribute("width", str(width))
+        pixel = canvas.evaluate("""image => {
+            const sample = document.createElement('canvas');
+            const context = sample.getContext('2d');
+            context.drawImage(image, 0, 0);
+            return Array.from(context.getImageData(0, 0, 1, 1).data);
+        }""")
+        assert pixel[3] == 255 and all(abs(channel - expected) < 10 for channel, expected in zip(pixel, color)), pixel
+    assert ranges[0] == "bytes=0-65535" and any(item.startswith("bytes=65536-") for item in ranges[1:])
+    screen.get_by_role("button", name="页面预览").click()
+    expect(screen.locator("#preview-list canvas")).to_have_count(4)
+    screen.close()
+
+
 def verify_reader_limits(browser, folder):
     cli = [sys.executable, str(ROOT / "pack.py")]
     big = folder / "large.png"
@@ -212,8 +242,9 @@ with sync_playwright() as playwright:
         expect(mobile.locator("[data-chunk='3'] canvas")).to_be_visible(timeout=15000)
         mobile.screenshot(path=ROOT / ".cache" / "test" / "mobile-reader.png")
         verify_previews(browser)
+        verify_original_codecs(browser)
         with TemporaryDirectory() as temporary:
             verify_reader_limits(browser, Path(temporary))
     finally:
         browser.close()
-print("PASS: Chromium Range playback, previews, RTL navigation, out-of-order blocks, jump, large pages and metadata recovery.")
+print("PASS: Chromium Range playback, original codecs, previews, RTL navigation, and recovery.")

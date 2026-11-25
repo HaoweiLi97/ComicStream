@@ -118,4 +118,59 @@ with patch.dict(pack.__globals__, {"READER_INDEX_BYTES": 52}):
     with TestCase().assertRaisesRegex(ValueError, "Index.*reading"):
         pack(boundary_output, [small], thumbnails=True, strip_height=60)
 assert boundary_output.read_bytes() == boundary_data
-print("PASS: page order, strip pixels, metadata, v1 thumbnails, and packer read limits.")
+
+mixed = LIBRARY / "mixed-formats.cstr"
+mixed_archive = CACHE / "mixed-formats.cbz"
+mixed_sources = CACHE / "mixed-formats"
+mixed_sources.mkdir(exist_ok=True)
+original_pages = []
+with ZipFile(mixed_archive, "w") as bundle:
+    for filename, codec, size, color, options in (
+        ("1.jpg", 4, (2000, 128), (200, 30, 40), {"progressive": True}),
+        ("2.png", 3, (180, 256), (30, 180, 40), {}),
+        ("3.webp", 1, (180, 256), (40, 50, 200), {"lossless": True}),
+        ("4.avif", 2, (180, 256), (220, 160, 30), {}),
+    ):
+        path = mixed_sources / filename
+        pixels = Random(2).randbytes(size[0] * size[1] * 3) if codec == 3 else None
+        with (Image.frombytes("RGB", size, pixels) if pixels else Image.new("RGB", size, color)) as image:
+            image.paste(color, (0, 0, 20, 20))
+            image.save(path, **options)
+        original = path.read_bytes()
+        original_pages.append((codec, size, original))
+        bundle.writestr(filename, original)
+
+subprocess.run(cli + ["--cbz", str(mixed_archive), "--thumbnails", "-o", str(mixed)], check=True)
+data = mixed.read_bytes()
+assert unpack_from("<HHIIQ", data, 4) == (1, 1, 4, 4, 32)
+body_start = 32 + unpack_from("<I", data, 24)[0]
+for page, (codec, (width, height), original) in enumerate(original_pages):
+    assert unpack_from("<IIII", data, 32 + page * 16) == (width, height, page, 1)
+    chunk_h, chunk_codec, offset, size = unpack_from("<IB3xQI", data, 32 + 4 * 16 + page * 20)
+    assert (chunk_h, chunk_codec, size) == (height, codec, len(original))
+    assert data[body_start + offset:body_start + offset + size] == original
+
+rotated = CACHE / "rotation-test.jpg"
+with Image.new("RGB", (40, 64), "tomato") as image:
+    exif = image.getexif()
+    exif[274] = 6
+    image.save(rotated, exif=exif)
+fallback_output = CACHE / "codec-fallback.cstr"
+pack(fallback_output, [rotated])
+data = fallback_output.read_bytes()
+assert unpack_from("<IIII", data, 32) == (64, 40, 0, 1)
+assert unpack_from("<IB", data, 48) == (40, 1)
+for options in ({"webp": True}, {"quality": 85}, {"lossless": True}, {"strip_height": 128}):
+    pack(fallback_output, [mixed_sources / "2.png"], **options)
+    data = fallback_output.read_bytes()
+    assert unpack_from("<IB", data, 48) == (options.get("strip_height", 256), 1)
+
+animated = CACHE / "animated.apng"
+with Image.new("RGB", (20, 30), "red") as first, Image.new("RGB", first.size, "blue") as second:
+    first.save(animated, format="PNG", save_all=True, append_images=[second], duration=200)
+animated_archive = CACHE / "animated.cbz"
+with ZipFile(animated_archive, "w") as bundle:
+    bundle.write(animated, animated.name)
+result = subprocess.run(cli + ["--cbz", str(animated_archive), "-o", str(fallback_output)], capture_output=True)
+assert result.returncode == 1 and b"single image frame" in result.stderr
+print("PASS: original bytes for all four codecs, WebP fallback, and single-frame validation.")

@@ -1,6 +1,7 @@
 import { fileSource, FileReplaced, FormatError, LIMITS, openHttp, RangeErrorResponse, RangeSessionError, readComic, readingDirection } from "./cstr.js";
 import type { ByteSource, Comic, ReadingDirection } from "./cstr.js";
 import { bitmapCost, decodeWebP } from "./webp.js";
+import { decodeImage } from "./images.js";
 
 const find = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
 const opening = find("opening");
@@ -319,7 +320,6 @@ class Reader {
       const chunk = this.comic.chunks[id];
       const page = this.comic.pages[chunk.page];
       try {
-        if (chunk.codec !== 1) throw new FormatError("此阅读器暂不支持该图像编码");
         if (chunk.size > LIMITS.chunk) throw new FormatError("压缩图像超过读取上限");
         bitmapCost(page.width, chunk.height);
       } catch (error) {
@@ -383,8 +383,9 @@ class Reader {
         const chunk = this.comic.chunks[id];
         try {
           const offset = Number(chunk.start - first.start);
-          const bitmap = await decodeWebP(
-            bytes.subarray(offset, offset + chunk.size), this.comic.pages[chunk.page].width, chunk.height, width, height,
+          const bitmap = await decodeImage(
+            bytes.subarray(offset, offset + chunk.size), chunk.codec, this.comic.pages[chunk.page].width,
+            chunk.height, width, height,
           );
           try {
             signal.throwIfAborted();

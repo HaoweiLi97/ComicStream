@@ -1,7 +1,7 @@
 import { FormatError, LIMITS } from "./cstr.js";
 
 export function bitmapCost(width: number, height: number) {
-  if (width > 16383 || height > 16383 || width * height * 4 > LIMITS.decoded) {
+  if (width < 1 || height < 1 || width > 16383 || height > 16383 || width * height * 4 > LIMITS.decoded) {
     throw new FormatError("图像尺寸超过解码上限");
   }
   return width * height * 4;

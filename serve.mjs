@@ -5,7 +5,7 @@ import { pipeline } from "node:stream/promises";
 const files = new Map([
   ["/", ["index.html", "text/html; charset=utf-8"]],
   ["/reader.css", ["reader.css", "text/css; charset=utf-8"]],
-  ...["reader", "cstr", "webp"].map(name => [
+  ...["reader", "cstr", "webp", "images"].map(name => [
     "/dist/" + name + ".js", ["dist/" + name + ".js", "text/javascript; charset=utf-8"],
   ]),
 ]);
