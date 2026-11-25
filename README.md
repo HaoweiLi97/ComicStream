@@ -6,7 +6,7 @@ CSTR (`.cstr`) is a comic file format optimized for streaming. Its binary index 
 
 ## CSTR file layout
 
-![CSTR v1 file layout and byte offsets for header, page, chunk, and thumbnail records (Chinese labels)](docs/images/cstr-v1-layout.zh-CN.png)
+![CSTR v1 file layout and byte offsets for header, page, chunk, and thumbnail records and optional cover descriptor](docs/images/cstr-v1-layout.en.png)
 
 ```text
 [Header][Cover descriptor*][Page table][Chunk table][Thumbnail table*][JSON metadata*][Cover WebP*][Image chunks][Thumbnail data*]
