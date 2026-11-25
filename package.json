@@ -1,0 +1,16 @@
+{
+  "name": "comicstream",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "build": "tsc",
+    "start": "node serve.mjs",
+    "test": "npm run build && node --test --test-isolation=none tests/*.test.mjs"
+  },
+  "devDependencies": {
+    "typescript": "5.9.3"
+  }
+}

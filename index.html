@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#211e1b">
+  <title>ComicStream</title>
+  <link rel="stylesheet" href="/reader.css">
+  <script src="/dist/reader.js" type="module"></script>
+</head>
+<body>
+  <header class="masthead">
+    <span class="brand">ComicStream</span>
+    <span id="book-title" class="book-title" hidden></span>
+    <button id="change" type="button" hidden>打开其他</button>
+  </header>
+  <main id="opening">
+    <div class="opening-inner">
+      <h1>打开漫画</h1>
+      <div class="sources">
+        <div class="local">
+          <button class="primary" id="pick" type="button">选择 .cstr 文件</button>
+          <input id="file" type="file" accept=".cstr,application/octet-stream" hidden>
+        </div>
+        <form id="remote">
+          <label for="address">漫画包链接</label>
+          <div class="url-row">
+            <input id="address" type="text" inputmode="url" placeholder="https://…/comic.cstr" required>
+            <button type="submit">打开链接</button>
+          </div>
+          <label class="check"><input id="mutable" type="checkbox"> 链接内容可能更新</label>
+        </form>
+      </div>
+      <p id="open-status" role="status"></p>
+    </div>
+  </main>
+  <main id="viewport" aria-label="漫画阅读区" tabindex="0" hidden>
+    <div id="pages"></div>
+  </main>
+  <p id="notice" class="notice" role="status" hidden></p>
+  <footer id="navigation" hidden>
+    <button id="previous" type="button">上一页</button>
+    <label class="page-number">第 <input type="number" min="1" id="page" aria-label="跳到第几页"> 页</label>
+    <span id="total"></span>
+    <button id="next" type="button">下一页</button>
+  </footer>
+</body>
+</html>

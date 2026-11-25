@@ -1,0 +1,73 @@
+:root {
+  color-scheme: dark;
+  --surface: #211e1b;
+  --paper: #2d2823;
+  --stage: #191715;
+  --text: #f8efe4;
+  --muted: #c1b3a4;
+  --line: #62564a;
+  --accent: #ffd29a;
+  --error: #ffbea8;
+  font-family: "Source Sans 3", "Microsoft YaHei", "PingFang SC", sans-serif;
+  background: var(--surface);
+  color: var(--text);
+}
+*, *::before, *::after { box-sizing: border-box; }
+[hidden] { display: none !important; }
+body { margin: 0; height: 100vh; height: 100dvh; display: flex; flex-direction: column; }
+::selection { background: var(--accent); color: var(--stage); }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+button, input { font: inherit; }
+button {
+  border: 1px solid var(--line); background: var(--paper); color: var(--text);
+  padding: .65rem .9rem; border-radius: .35rem; cursor: pointer; white-space: nowrap;
+  min-height: 2.75rem;
+}
+button:hover:not(:disabled) { border-color: var(--accent); }
+button:disabled { opacity: .5; cursor: default; }
+.primary { background: var(--accent); border-color: var(--accent); color: #2b1c0f; font-weight: 650; }
+.primary:hover { background: #ffe1ba; }
+.masthead {
+  flex: none; min-height: 3.75rem; display: flex; align-items: center; gap: 1.2rem;
+  padding: .4rem clamp(.8rem, 4vw, 3rem); border-bottom: 1px solid var(--line);
+}
+.brand { font-size: 1.2rem; font-weight: 700; letter-spacing: -.025em; }
+.book-title { color: var(--muted); overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+#change { margin-left: auto; }
+#opening { flex: 1; overflow: auto; display: grid; align-items: center; }
+.opening-inner { width: min(100% - 2rem, 47rem); padding: 3rem 0; margin: auto; }
+h1 { margin: 0 0 2rem; font-size: clamp(2.5rem, 8vw, 4.5rem); letter-spacing: -.04em; line-height: 1.08; }
+.sources { border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); display: grid; grid-template-columns: auto minmax(0, 1fr); }
+.local { display: flex; align-items: center; padding: 1.5rem 1.5rem 1.5rem 0; border-right: 1px solid var(--line); }
+form { display: grid; gap: .65rem; padding: 1.5rem 0 1.5rem 1.5rem; }
+label { font-size: .95rem; }
+.check { display: flex; align-items: center; gap: .35rem; color: var(--muted); }
+input { accent-color: var(--accent); }
+input:not([type="checkbox"]) { background: var(--stage); color: var(--text); border: 1px solid var(--line); border-radius: .35rem; padding: .5rem; }
+input::placeholder { color: var(--muted); }
+.url-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: .5rem; }
+#open-status { color: var(--error); min-height: 1.5em; margin-top: 1rem; overflow-wrap: anywhere; }
+#viewport { flex: 1; min-height: 0; overflow: auto; background: var(--stage); overscroll-behavior: contain; overflow-anchor: none; scrollbar-color: var(--line) var(--stage); }
+#viewport:focus-visible { outline-offset: -3px; }
+#pages { padding: 1.25rem 0; }
+.comic-page { width: min(100% - 1.5rem, 60rem); margin-inline: auto; }
+.comic-page + .comic-page { margin-top: 1rem; }
+.strip { width: 100%; position: relative; background: var(--paper); }
+.strip canvas, .strip button { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+.strip button { min-height: 0; padding: 0 .4rem; white-space: normal; overflow: hidden; color: var(--error); }
+.strip-status { position: absolute; inset: 0; display: grid; place-items: center; overflow: hidden; }
+footer {
+  flex: none; display: flex; align-items: center; justify-content: center; flex-wrap: wrap;
+  gap: .55rem; padding: .5rem; border-top: 1px solid var(--line); font-variant-numeric: tabular-nums;
+}
+.page-number { display: flex; align-items: center; gap: .35rem; }
+#page { width: 4.5rem; text-align: center; }
+#total { color: var(--muted); font-size: .9rem; }
+.notice { flex: none; margin: 0; padding: .5rem 1rem; color: var(--error); border-top: 1px solid var(--line); overflow-wrap: anywhere; }
+@media (max-width: 560px) {
+  .sources { grid-template-columns: 1fr; }
+  .local { padding: 1rem 0; border-right: 0; border-bottom: 1px solid var(--line); }
+  form { padding: 1rem 0; }
+  .comic-page { width: 100%; }
+  .masthead { gap: .55rem; }
+}
