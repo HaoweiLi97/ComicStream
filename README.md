@@ -38,7 +38,7 @@ The optional `readingDirection` field accepts `ltr` (left to right), `rtl` (righ
 
 ## Windows desktop converter
 
-![CSTR Converter showing a mixed batch with four completed tasks and one failed PDF](docs/images/cstr-converter.en.jpg)
+![CSTR Converter showing a mixed batch with four completed tasks and one failed PDF](docs/images/cstr-converter-queue.en.jpg)
 
 Double-click `CSTR-Converter.exe`. Use Add tasks to select CBZ/ZIP, CBR/RAR, CB7/7Z, CBT/TAR, PDF, EPUB, MOBI, AZW, AZW3, or JSON image manifests, or drag a mix of files and folders from Explorer onto the task list. Each archive, e-book, PDF, manifest, and folder becomes a separate task. Loose images from one drop form one task. Folder input includes images in subfolders. Unsupported files are skipped, with a count above the list.
 

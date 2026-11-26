@@ -10,7 +10,7 @@ from zipfile import ZIP_DEFLATED, ZipFile
 
 ROOT = "ComicStream-Portable"
 EXECUTABLES = ("CSTR-Converter.exe", "CSTR-Reader.exe", "CSTR.exe")
-SCREENSHOTS = ("cstr-converter.en.jpg", "cstr-converter.zh-CN.jpg")
+SCREENSHOTS = ("cstr-converter-queue.en.jpg", "cstr-converter-queue.zh-CN.jpg")
 CALIBRE_KEEP_ROOT = {"ebook-convert.exe", "calibre-parallel.exe", "LICENSE"}
 # Keep Qt's image plugins, fonts, and locale data for Kindle-to-EPUB conversion.
 CALIBRE_UNUSED_TREES = (

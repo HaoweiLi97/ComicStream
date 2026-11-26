@@ -38,7 +38,7 @@ CSTR（`.cstr`）是为流式阅读优化的漫画文件格式。文件开头的
 
 ## Windows 桌面转换器
 
-![CSTR 转换器的混合批处理队列，四项已完成，一项 PDF 转换失败](docs/images/cstr-converter.zh-CN.jpg)
+![CSTR 转换器的混合批处理队列，四项已完成，一项 PDF 转换失败](docs/images/cstr-converter-queue.zh-CN.jpg)
 
 双击 `CSTR-Converter.exe`，通过「添加任务」导入 CBZ/ZIP、CBR/RAR、CB7/7Z、CBT/TAR、PDF、EPUB、MOBI、AZW、AZW3 或 JSON 图片清单。也可以从资源管理器一次拖入多个文件和图片文件夹。每个压缩包、电子书、PDF、清单或图片文件夹分别成为一项任务，同批散图合成一项。图片文件夹包含子文件夹中的图片。不支持的文件会跳过，列表上方会显示忽略数量。
 
