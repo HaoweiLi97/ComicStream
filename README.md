@@ -1,8 +1,8 @@
 # ComicStream
 
-English · [简体中文](README.zh-CN.md)
+English · [Simplified Chinese](README.zh-CN.md)
 
-CSTR (`.cstr`) is a comic file format optimized for streaming. Its binary index lets a reader load a page, a visible segment of a long webtoon, or a complete page thumbnail on demand over HTTP Range. ComicStream includes a Python packer and a browser reader.
+CSTR (`.cstr`) is a comic file format optimized for streaming. Its binary index lets a reader load a page, a visible segment of a long webtoon, or a complete page thumbnail on demand over HTTP Range. ComicStream includes desktop and command-line converters, a Windows reference reader, and a browser reader.
 
 ## CSTR file layout
 
@@ -36,9 +36,75 @@ File offsets use half-open ranges. In the reference sample, the first chunk occu
 
 The optional `readingDirection` field accepts `ltr` (left to right), `rtl` (right to left), or `ttb` (top to bottom). The index always follows reading order. The browser reader uses the field to configure navigation, including left and right arrow keys and thumbnail order in RTL mode.
 
-## Pack a CBZ or image files
+## Windows desktop converter
 
-Requires Python 3.10 or later. AVIF input also requires a Pillow build with AVIF support. Run these commands from the project directory.
+![CSTR Converter showing a mixed batch with four completed tasks and one failed PDF](docs/images/cstr-converter.en.jpg)
+
+Double-click `CSTR-Converter.exe`. Use Add tasks to select CBZ/ZIP, CBR/RAR, CB7/7Z, CBT/TAR, PDF, EPUB, MOBI, AZW, AZW3, or JSON image manifests, or drag a mix of files and folders from Explorer onto the task list. Each archive, e-book, PDF, manifest, and folder becomes a separate task. Loose images from one drop form one task. Folder input includes images in subfolders. Unsupported files are skipped, with a count above the list.
+
+Use the **Language** selector in the top-right corner to switch between English and Simplified Chinese. The app remembers the choice. PDFs are rendered in page order at 144 DPI for typical pages. CBR, CB7, and CBT use the Windows system `tar.exe`, so compatibility depends on the system version. The desktop converter handles inputs that can be opened without a password.
+
+EPUB and Kindle image comics retain their image reading order, title, and reading direction. MOBI, AZW, and AZW3 require calibre's `ebook-convert`. The converter uses the `calibre` folder beside the EXE if present, then checks the system path and default install locations. `CSTR_EBOOK_CONVERT` overrides discovery. Export books that need text or vector layout preserved as PDF before converting them. [calibre for Windows](https://calibre-ebook.com/download_windows)
+
+**Shared output folder** saves all pending tasks to one folder and starts with the directory containing the first input. **Beside each source** saves each output beside its source archive, manifest, or image folder. Loose images produce an output in the first image's folder. Outputs are named after their inputs. Duplicate names in the queue get numeric suffixes when they target the same directory.
+
+Page thumbnails and a first-page cover are enabled by default. You can turn either off in the batch conversion settings.
+
+Select a task and click **Edit JSON…** to import a UTF-8 JSON file or edit the metadata object for that task. Click **Apply** to include those fields in its output. An explicit reading direction in the batch settings takes precedence over `readingDirection` in the JSON. Clear the editor and apply to remove the configured metadata.
+
+Click **Convert** to run pending tasks. The list shows each task's status and progress, and the status bar shows batch totals. Select a failed task to see its error. After making any corrections, click **Requeue** to put that task back in the queue. The rest of the batch continues when a task fails.
+
+The EXE bundles its runtime. To build it from source, run these commands from the project directory on Windows. The result is `dist/CSTR-Converter.exe`.
+
+~~~powershell
+python -m pip install -r requirements-build.txt
+.\build_converter.ps1
+~~~
+
+To run the interface from source, install `requirements.txt` and run `python converter.py`.
+
+## Windows reference reader
+
+Open `CSTR-Reader.exe`, then select or drop a local `.cstr` file or enter an HTTP(S) URL that supports Range requests. It reads visible chunks on demand and offers page jumps, keyboard navigation, and on-demand covers and page previews when included in the file. Use the **Language** selector in the toolbar at any time. The app remembers the language and keeps your current page when you switch.
+
+The Windows reference app uses Tkinter for the window and Pillow for decoding. Like ScrapeFun, it reads the index first, then reads visible image chunks, previews, and the cover on demand. A page can scroll vertically, and the arrow keys follow the comic's reading direction. Remote files use HTTP(S) byte ranges. The separate browser reader continues to use the TypeScript implementation.
+
+~~~powershell
+python -m pip install -r requirements-build.txt
+.\build_reader.ps1
+~~~
+
+The result is `dist/CSTR-Reader.exe`. To run from source, install `requirements.txt` and run `python desktop_reader.py`.
+
+## Windows portable package
+
+Extract `ComicStream-Portable-Lite-win-x64.zip` to a writable local folder on Windows 10 version 1809 or later or Windows 11. The folder includes `CSTR-Converter.exe`, `CSTR-Reader.exe`, `CSTR.exe`, and the calibre conversion runtime. Reading local comics and converting Kindle files work offline. Preferences and runtime data go into `Data` beside the EXEs. Keep the entire extracted folder together when moving it.
+
+[Download the Windows portable package from GitHub Releases](https://github.com/HaoweiLi97/ComicStream/releases/latest)
+
+To rebuild the ZIP, install the build dependencies and point the build script to the expanded x64 calibre application directory. The calibre 9.19.0 package omits components for its own viewer, editor, and text-to-speech. [calibre for Windows](https://calibre-ebook.com/download_windows)
+
+~~~powershell
+python -m pip install -r requirements-build.txt
+.\build_portable.ps1 -CalibreDirectory 'C:\build\Calibre2'
+~~~
+
+## Convert comics on the command line
+
+From PowerShell in the portable folder, use `CSTR.exe`. Repeat `-i` to mix the same format types as the desktop converter, including image folders.
+
+~~~powershell
+.\CSTR.exe --help
+.\CSTR.exe -i book.cbz -i book.mobi -i "Image folder" -d output
+.\CSTR.exe -i book.epub --list-pages
+.\CSTR.exe -i book.pdf -o book.cstr --no-thumbnails --no-cover
+~~~
+
+Each `-i` creates one task. Omit `-d` to write beside each input. Colliding output names in a batch get numeric suffixes. Existing files require `--overwrite`. A failed task is reported on standard error and the remaining tasks continue. The command exits with status 1 if any task fails. With `-i`, thumbnails and a first-page cover are enabled by default. Positional image paths remain available to combine loose images into one comic.
+
+### Run from source or use existing scripts
+
+`python pack.py` accepts the same arguments. It requires Python 3.10 or later. AVIF input also requires a Pillow build with AVIF support. These calls retain the existing CBZ, manifest, and positional image modes and their opt-in cover and thumbnail settings.
 
 ~~~powershell
 py -m pip install -r requirements.txt
@@ -90,6 +156,11 @@ The development server supports Range requests for files in `library/`. For exam
 ~~~powershell
 npm test
 py tests/create_fixture.py
+py tests/native_reader.py
 ~~~
 
 To run the browser tests, leave `npm start` running and install Python Playwright and Chromium. Run `py tests/browser.py` to check local files, HTTP Range reads, out-of-order responses, previews, and page navigation. Set `CSTR_CHROME` to use an installed browser or `CSTR_PORT` to change the local port.
+
+## License
+
+ComicStream's source and documentation use the MIT License. Bundled third-party components retain their own licenses. The portable ZIP includes those notices and a link to the corresponding calibre source under GPL v3. [MIT License](LICENSE)

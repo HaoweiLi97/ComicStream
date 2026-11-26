@@ -1,16 +1,17 @@
 """Pack naturally sorted manga pages into a CSTR file."""
 
 import argparse
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 from fractions import Fraction
 from io import BytesIO
 import json
 from math import ceil
-from os import fstat
+import os
 from pathlib import Path, PurePosixPath
 import re
 from shutil import copyfileobj
 from struct import Struct, unpack_from
+import sys
 from tempfile import NamedTemporaryFile, TemporaryFile
 import warnings
 from zipfile import BadZipFile, ZipFile
@@ -56,11 +57,34 @@ def archive_pages(archive):
     candidates = []
     for entry in archive.infolist():
         path = PurePosixPath(entry.filename.replace("\\", "/"))
-        if (not entry.is_dir() and path.suffix.lower() in IMAGE_EXTENSIONS
-                and all(part != "__MACOSX" and not part.startswith(".") for part in path.parts)):
+        if not entry.is_dir() and is_comic_image(path):
             candidates.append((entry, path))
     candidates.sort(key=lambda candidate: natural_key(candidate[1]))
     return [entry for entry, _ in candidates]
+
+
+def is_comic_image(path):
+    return (path.suffix.lower() in IMAGE_EXTENSIONS
+            and all(part != "__MACOSX" and not part.startswith(".") for part in path.parts))
+
+
+@contextmanager
+def decoded_page(path, archive):
+    render = getattr(archive, "open_image", None)
+    if render is not None:
+        with render(path) as image:
+            yield image, None
+    else:
+        source = path.open("rb") if archive is None else archive.open(path)
+        with source as page_source, Image.open(page_source) as image:
+            yield image, page_source
+
+
+def manifest_pages(path):
+    entries = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(entries, list) or any(not isinstance(entry, str) or not entry for entry in entries):
+        raise ValueError("Manifest must be an ordered JSON array of nonempty image paths")
+    return [path.parent / entry for entry in entries]
 
 
 def write_thumbnail(image, destination, table):
@@ -174,9 +198,26 @@ def encode_cover(image, width, height, quality, budget):
         width, height = (max(1, n * 3 // 4) for n in size)
 
 
+def encode_metadata(metadata, reading_direction=None):
+    if metadata is not None and not isinstance(metadata, dict):
+        raise ValueError("Metadata must be a JSON object")
+    if reading_direction is not None:
+        metadata = {**(metadata or {}), "readingDirection": reading_direction}
+    if metadata is not None and "readingDirection" in metadata:
+        if metadata["readingDirection"] not in READING_DIRECTIONS:
+            raise ValueError("Reading direction must be ltr, rtl or ttb")
+    data = b"" if metadata is None else json.dumps(
+        metadata, ensure_ascii=False, allow_nan=False, separators=(",", ":")
+    ).encode("utf-8")
+    if len(data) > READER_METADATA_BYTES:
+        raise ValueError(f"Metadata exceeds ComicStream's {READER_METADATA_BYTES // 1024} KiB reading limit")
+    return data
+
+
 def pack(output, inputs, *, strip_height=0, quality=None, lossless=False, metadata=None,
          archive=None, thumbnails=False, reading_direction=None, webp=False, cover=False,
-         cover_file=None, cover_page=None, cover_width=None, cover_height=None, cover_kib=None, cover_quality=None):
+         cover_file=None, cover_page=None, cover_width=None, cover_height=None, cover_kib=None, cover_quality=None,
+         progress=None, overwrite=True):
     page_record_size = PAGE.size + (THUMBNAIL.size if thumbnails else 0)
     if not inputs:
         raise ValueError("A nonempty list of pages is required")
@@ -197,7 +238,7 @@ def pack(output, inputs, *, strip_height=0, quality=None, lossless=False, metada
         if cover_file.resolve() == output.resolve():
             raise ValueError("The output path is also the cover file")
         with cover_file.open("rb") as source:
-            if fstat(source.fileno()).st_size > 32 * 1024 * 1024:
+            if os.fstat(source.fileno()).st_size > 32 * 1024 * 1024:
                 raise ValueError("Cover input exceeds 32 MiB")
             with Image.open(source) as image:
                 if image.width * image.height > 32_000_000 or getattr(image, "n_frames", 1) != 1:
@@ -216,18 +257,7 @@ def pack(output, inputs, *, strip_height=0, quality=None, lossless=False, metada
     resolved_output = output.resolve()
     if any(resolved_output == path.resolve() for path in original_paths):
         raise ValueError("The output path is also an input page")
-    if metadata is not None and not isinstance(metadata, dict):
-        raise ValueError("Metadata must be a JSON object")
-    if reading_direction is not None:
-        metadata = {**(metadata or {}), "readingDirection": reading_direction}
-    if metadata is not None and "readingDirection" in metadata:
-        if metadata["readingDirection"] not in READING_DIRECTIONS:
-            raise ValueError("Reading direction must be ltr, rtl or ttb")
-    meta = b"" if metadata is None else json.dumps(
-        metadata, ensure_ascii=False, allow_nan=False, separators=(",", ":")
-    ).encode("utf-8")
-    if len(meta) > READER_METADATA_BYTES:
-        raise ValueError(f"Metadata exceeds ComicStream's {READER_METADATA_BYTES // 1024} KiB reading limit")
+    meta = encode_metadata(metadata, reading_direction)
 
     temporary_output = None
     try:
@@ -239,18 +269,19 @@ def pack(output, inputs, *, strip_height=0, quality=None, lossless=False, metada
             chunk_count = 0
             offset = 0
             for number, path in enumerate(inputs, 1):
+                if progress is not None:
+                    progress(number - 1, len(inputs))
                 with warnings.catch_warnings():
                     warnings.simplefilter("error", Image.DecompressionBombWarning)
                     label = path if archive is None else path.filename
-                    source = path.open("rb") if archive is None else archive.open(path)
-                    with source as page_source, Image.open(page_source) as image:
+                    with decoded_page(path, archive) as (image, page_source):
                         if getattr(image, "n_frames", 1) != 1:
                             raise ValueError(f"Expected a single image frame: {label}")
                         first_chunk = chunk_count
                         image.load()
                         original = None
-                        if not encode_webp:
-                            size = fstat(page_source.fileno()).st_size if archive is None else path.file_size
+                        if not encode_webp and page_source is not None:
+                            size = os.fstat(page_source.fileno()).st_size if archive is None else path.file_size
                             original = original_bytes(image, page_source, size, strip_height or READER_MAX_DIMENSION)
                         if original is None:
                             # Apply orientation before writing replacement chunks or thumbnails.
@@ -291,6 +322,8 @@ def pack(output, inputs, *, strip_height=0, quality=None, lossless=False, metada
                             chunk_count += 1
                             y = bottom
                         page_table.extend(PAGE.pack(width, height, first_chunk, chunk_count - first_chunk))
+            if progress is not None:
+                progress(len(inputs), len(inputs))
             index_size = len(page_table) + len(chunk_table) + len(thumbnail_table)
             preview_size = previews.tell() if previews is not None else 0
             header_size = HEADER.size + (COVER.size if cover else 0)
@@ -314,7 +347,13 @@ def pack(output, inputs, *, strip_height=0, quality=None, lossless=False, metada
                 if previews is not None:
                     previews.seek(0)
                     copyfileobj(previews, destination, length=1024 * 1024)
-        temporary_output.replace(output)
+        if overwrite:
+            temporary_output.replace(output)
+        elif os.name == "nt":
+            # Windows rename fails if another process has already created the output.
+            temporary_output.rename(output)
+        else:
+            os.link(temporary_output, output)
     finally:
         if temporary_output is not None:
             temporary_output.unlink(missing_ok=True)
@@ -322,16 +361,25 @@ def pack(output, inputs, *, strip_height=0, quality=None, lossless=False, metada
 
 
 def main():
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(errors="backslashreplace")
     cli = argparse.ArgumentParser(description=__doc__)
-    cli.add_argument("-o", "--output", type=Path)
+    cli.add_argument("-i", "--input", action="append", type=Path, metavar="PATH",
+                     help="Add a comic archive, PDF, e-book, manifest, image, or folder. Repeat for a batch.")
+    cli.add_argument("-o", "--output", type=Path, help="Output filename for a single comic")
+    cli.add_argument("-d", "--output-dir", type=Path, help="Shared output folder for --input tasks")
+    cli.add_argument("--overwrite", action="store_true", help="Allow --input tasks to replace existing files")
     cli.add_argument("--strip-height", type=int, default=0,
                      help="Maximum strip height in pixels (0 cuts only when required by reader or WebP limits)")
     cli.add_argument("--webp", action="store_true", help="Encode all body images as WebP")
     cli.add_argument("--quality", type=int, help="Encode body images as WebP at this quality (0–100)")
     cli.add_argument("--lossless", action="store_true", help="Encode body images as lossless WebP")
     cli.add_argument("--metadata", type=Path, help="Path to a UTF-8 JSON object")
-    cli.add_argument("--thumbnails", action="store_true", help="Embed optional page thumbnails in CSTR v1")
-    cli.add_argument("--cover", action="store_true", help="Embed the first page as a separate CSTR v1 cover")
+    cli.add_argument("--thumbnails", action=argparse.BooleanOptionalAction,
+                     help="Embed page thumbnails (enabled by default with --input)")
+    cli.add_argument("--cover", action=argparse.BooleanOptionalAction,
+                     help="Embed the first page as a separate cover (enabled by default with --input)")
     source = cli.add_mutually_exclusive_group()
     source.add_argument("--cover-file", type=Path, help="Generate the cover from an external image")
     source.add_argument("--cover-page", type=int, help="Generate the cover from this page (numbered from 1)")
@@ -348,21 +396,30 @@ def main():
     cli.add_argument("images", type=Path, nargs="*", help="Input images, sorted by natural path order")
     args = cli.parse_args()
     try:
-        if sum((bool(args.images), bool(args.manifest), bool(args.cbz))) != 1:
-            raise ValueError("Choose one input: positional images, --manifest or --cbz")
-        if not args.list_pages and args.output is None:
+        if sum((bool(args.images), bool(args.manifest), bool(args.cbz), bool(args.input))) != 1:
+            raise ValueError("Choose one input mode: --input, positional images, --manifest or --cbz")
+        if args.output_dir is not None and not args.input:
+            raise ValueError("--output-dir requires --input")
+        if args.output and (args.output_dir is not None or (args.input and len(args.input) > 1)):
+            raise ValueError("--output is for a single comic and cannot be combined with --output-dir")
+        if not args.list_pages and args.output is None and not args.input:
             raise ValueError("--output is required to write a pack")
-        inputs = args.images
-        if args.manifest:
-            entries = json.loads(args.manifest.read_text(encoding="utf-8"))
-            if not isinstance(entries, list) or any(not isinstance(path, str) or not path for path in entries):
-                raise ValueError("Manifest must be an ordered JSON array of nonempty image paths")
-            inputs = [args.manifest.parent / path for path in entries]
         metadata = None
         if args.metadata:
             metadata = json.loads(args.metadata.read_text(encoding="utf-8"))
             if not isinstance(metadata, dict):
                 raise ValueError("Metadata must be a JSON object")
+        options = dict(strip_height=args.strip_height, quality=args.quality, lossless=args.lossless, metadata=metadata,
+                       thumbnails=bool(args.input) if args.thumbnails is None else args.thumbnails,
+                       reading_direction=args.reading_direction, webp=args.webp,
+                       cover=bool(args.input) if args.cover is None else args.cover, cover_file=args.cover_file,
+                       cover_page=args.cover_page, cover_width=args.cover_width, cover_height=args.cover_height,
+                       cover_kib=args.cover_kib, cover_quality=args.cover_quality)
+        if args.input:
+            from converter_cli import run_inputs
+
+            raise SystemExit(run_inputs(args, options))
+        inputs = manifest_pages(args.manifest) if args.manifest else args.images
         with (ZipFile(args.cbz) if args.cbz else nullcontext()) as archive:
             if archive is not None:
                 inputs = archive_pages(archive)
@@ -373,12 +430,7 @@ def main():
                 for index, page in enumerate(pages, 1):
                     print(f"{index}\t{page if archive is None else page.filename}")
                 return
-            count = pack(args.output, inputs, strip_height=args.strip_height, quality=args.quality,
-                         lossless=args.lossless, metadata=metadata, archive=archive,
-                         thumbnails=args.thumbnails, reading_direction=args.reading_direction, webp=args.webp,
-                         cover=args.cover, cover_file=args.cover_file, cover_page=args.cover_page,
-                         cover_width=args.cover_width, cover_height=args.cover_height,
-                         cover_kib=args.cover_kib, cover_quality=args.cover_quality)
+            count = pack(args.output, inputs, archive=archive, **options)
     except (OSError, ValueError, BadZipFile, RuntimeError,
             Image.DecompressionBombError, Image.DecompressionBombWarning) as error:
         cli.exit(1, f"cstr: {error}\n")
