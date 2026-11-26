@@ -368,7 +368,7 @@ export async function readComic(
   }
 
   return {
-    pages, chunks, thumbnails, thumbnailError, source, readThumbnails,
+    pages, chunks, thumbnails, thumbnailError, source, readThumbnails, hasCover: (flags & FLAG_COVER) !== 0,
     async readCover(coverSignal?: AbortSignal) {
       if (!(flags & FLAG_COVER)) return undefined;
       const last = thumbnails.at(-1);
